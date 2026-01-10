@@ -1,0 +1,4 @@
+// odin
+
+> cd source-code
+> odin build .
