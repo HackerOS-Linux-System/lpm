@@ -1,0 +1,11 @@
+// tar
+// hpm
+// zstd
+// hl
+
+> cd build-hpm
+> hl compile wrapper.hl
+> cd contents
+> curl -LO https://github.com/HackerOS-Linux-System/legendary/releases/download/v0.1/legendary && chmod a+x legendary
+> cd ..
+> hpm build legendary
