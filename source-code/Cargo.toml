@@ -1,6 +1,6 @@
 [package]
 name = "legendary"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A god-tier APT frontend"
 
@@ -12,6 +12,8 @@ anyhow = "1.0"
 cxx = "1.0"
 console = "0.15"
 dialoguer = "0.11"
+nix = { version = "0.27", features = ["user"] }
+lazy_static = "1.4"
 
 [build-dependencies]
 cxx-build = "1.0"
