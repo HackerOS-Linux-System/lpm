@@ -1,6 +1,5 @@
 // odin
-// g++
+// libapt-pkg6.0
 
 > cd source-code
-> g++ -c -fPIC apt_wrapper.cpp -o apt_wrapper.o `pkg-config --cflags apt-pkg`
-> odin build .
+> cargo build --release
