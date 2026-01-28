@@ -7,14 +7,14 @@
 #include <apt-pkg/cacheiterators.h>
 #include <apt-pkg/algorithms.h>
 #include <apt-pkg/update.h>
-#include <apt-pkg/acquire-item.h>
-#include <apt-pkg/sourcelist.h>
-#include <apt-pkg/pkgsystem.h>
+#include <apt-pkg/clean.h>
 #include <apt-pkg/upgrade.h>
 #include <apt-pkg/configuration.h>
+#include <apt-pkg/pkgrecords.h>
+#include <apt-pkg/acquire.h>
 #include <iostream>
+#include <sstream>
 
-// Ensure global variables from libapt-pkg are visible
 extern pkgSystem *_system;
 extern Configuration *_config;
 
@@ -52,132 +52,166 @@ void AptClient::update_cache() {
     }
 }
 
+// Helper to fill PkgInfo
+PkgInfo fill_info(pkgCache::PkgIterator P, pkgCacheFile &CacheFile) {
+    PkgInfo info;
+    info.name = P.Name();
+    info.current_state = (!P.CurrentVer().end()) ? 1 : 0;
+
+    pkgCache::VerIterator V;
+    if (CacheFile.GetDepCache() != nullptr) {
+        pkgDepCache::StateCache &State = (*CacheFile.GetDepCache())[P];
+        if (State.CandidateVer != nullptr) {
+            V = State.CandidateVerIter(*CacheFile.GetDepCache());
+        } else if (!P.CurrentVer().end()) {
+            V = P.CurrentVer();
+        }
+    } else if (!P.CurrentVer().end()) {
+        V = P.CurrentVer();
+    }
+
+    if (!V.end()) {
+        info.version = V.VerStr();
+        info.size = V->Size;
+        info.section = V.Section() ? V.Section() : "unknown";
+    } else {
+        info.version = "N/A";
+        info.size = 0;
+        info.section = "unknown";
+    }
+    return info;
+}
+
 rust::Vec<PkgInfo> AptClient::list_all() {
     rust::Vec<PkgInfo> result;
-
     if (impl->CacheFile.GetPkgCache() == nullptr) return result;
 
     pkgCache::PkgIterator P = impl->CacheFile.GetPkgCache()->PkgBegin();
     for (; !P.end(); ++P) {
-        // Use the iterator method to check for versions
+        if (P.VersionList().end()) continue;
+        result.push_back(fill_info(P, impl->CacheFile));
+    }
+    return result;
+}
+
+rust::Vec<PkgInfo> AptClient::search(rust::String term) {
+    rust::Vec<PkgInfo> result;
+    if (impl->CacheFile.GetPkgCache() == nullptr) return result;
+
+    std::string q = std::string(term);
+    pkgCache::PkgIterator P = impl->CacheFile.GetPkgCache()->PkgBegin();
+
+    for (; !P.end(); ++P) {
         if (P.VersionList().end()) continue;
 
-        PkgInfo info;
-        info.name = P.Name();
+        std::string name = P.Name();
+        bool match = name.find(q) != std::string::npos;
 
-        pkgCache::VerIterator V = P.VersionList();
-
-        if (!V.end() && V.Section()) {
-            info.section = V.Section();
-        } else {
-            info.section = "unknown";
+        // Search description if name doesn't match
+        if (!match) {
+            pkgCache::VerIterator V = P.VersionList(); // Simplification: check first version
+            if (!V.end()) {
+                pkgCache::DescIterator D = V.DescriptionList();
+                if (!D.end()) {
+                    pkgRecords Recs(impl->CacheFile);
+                    pkgRecords::Parser &Parser = Recs.Lookup(D.FileList());
+                    std::string desc = Parser.ShortDesc();
+                    if (desc.find(q) != std::string::npos) match = true;
+                }
+            }
         }
 
-        info.version = V.VerStr();
-        info.size = V->Size;
-        info.current_state = (!P.CurrentVer().end()) ? 1 : 0;
-
-        result.push_back(info);
+        if (match) {
+            result.push_back(fill_info(P, impl->CacheFile));
+        }
     }
     return result;
 }
 
 PkgInfo AptClient::find_package(rust::String name) {
-    PkgInfo info;
-    info.name = "";
-
-    if (impl->CacheFile.GetPkgCache() == nullptr) return info;
-
+    if (impl->CacheFile.GetPkgCache() == nullptr) return PkgInfo{};
     std::string s_name = std::string(name);
     pkgCache::PkgIterator P = impl->CacheFile.GetPkgCache()->FindPkg(s_name);
+    if (P.end()) return PkgInfo{};
+    return fill_info(P, impl->CacheFile);
+}
 
-    if (P.end()) {
-        return info;
-    }
+PkgDetails AptClient::get_package_details(rust::String name) {
+    PkgDetails details;
+    details.name = std::string(name);
 
-    info.name = P.Name();
+    if (impl->CacheFile.GetPkgCache() == nullptr) return details;
+    pkgCache::PkgIterator P = impl->CacheFile.GetPkgCache()->FindPkg(std::string(name));
+    if (P.end()) return details;
 
-    if (impl->CacheFile.GetDepCache() != nullptr) {
+    pkgCache::VerIterator V;
+    if (impl->CacheFile.GetDepCache()) {
         pkgDepCache::StateCache &State = (*impl->CacheFile.GetDepCache())[P];
+        V = State.CandidateVerIter(*impl->CacheFile.GetDepCache());
+    }
+    if (V.end()) V = P.CurrentVer();
+    if (V.end()) return details;
 
-        // CandidateVer is a raw pointer (Version *) in StateCache
-        if (State.CandidateVer != nullptr) {
-            pkgCache::VerIterator V = State.CandidateVerIter(*impl->CacheFile.GetDepCache());
-            info.version = V.VerStr();
-            info.size = V->Size;
-            if (V.Section()) {
-                info.section = V.Section();
-            } else {
-                info.section = "unknown";
-            }
-        } else if (!P.CurrentVer().end()) {
-            pkgCache::VerIterator V = P.CurrentVer();
-            info.version = V.VerStr();
-            info.size = V->Size;
-            if (V.Section()) {
-                info.section = V.Section();
-            } else {
-                info.section = "installed";
-            }
-        } else {
-            info.version = "N/A";
-            info.section = "N/A";
-            info.size = 0;
+    details.version = V.VerStr();
+    details.section = V.Section() ? V.Section() : "";
+    details.maintainer = "Unknown"; // Requires parsing binary data usually
+    details.installed_size = V->InstalledSize;
+    details.download_size = V->Size;
+
+    pkgRecords Recs(impl->CacheFile);
+    pkgRecords::Parser &Parser = Recs.Lookup(V.DescriptionList().FileList());
+    details.description = Parser.LongDesc();
+
+    // Dependencies
+    for (pkgCache::DepIterator D = V.DependsList(); !D.end(); ++D) {
+        if (D->Type == pkgCache::Dep::Depends) {
+            details.dependencies.push_back(D.TargetPkg().Name());
         }
-    } else {
-        if (!P.CurrentVer().end()) {
-            pkgCache::VerIterator V = P.CurrentVer();
-            info.version = V.VerStr();
-        } else {
-            info.version = "N/A";
-        }
-        info.section = "unknown";
-        info.size = 0;
     }
 
-    info.current_state = (!P.CurrentVer().end()) ? 1 : 0;
-    return info;
+    return details;
 }
 
 void AptClient::mark_install(rust::String name) {
     std::string s_name = std::string(name);
-    if (impl->CacheFile.GetPkgCache() == nullptr) return;
-
     pkgCache::PkgIterator P = impl->CacheFile.GetPkgCache()->FindPkg(s_name);
-    if (!P.end()) {
-        impl->CacheFile.GetDepCache()->MarkInstall(P, true);
-    }
+    if (!P.end()) impl->CacheFile.GetDepCache()->MarkInstall(P, true);
 }
 
 void AptClient::mark_remove(rust::String name) {
     std::string s_name = std::string(name);
-    if (impl->CacheFile.GetPkgCache() == nullptr) return;
-
     pkgCache::PkgIterator P = impl->CacheFile.GetPkgCache()->FindPkg(s_name);
-    if (!P.end()) {
-        impl->CacheFile.GetDepCache()->MarkDelete(P, false);
-    }
+    if (!P.end()) impl->CacheFile.GetDepCache()->MarkDelete(P, false);
+}
+
+void AptClient::mark_auto(rust::String name, bool is_auto) {
+    std::string s_name = std::string(name);
+    pkgCache::PkgIterator P = impl->CacheFile.GetPkgCache()->FindPkg(s_name);
+    if (!P.end()) impl->CacheFile.GetDepCache()->MarkAuto(P, is_auto);
 }
 
 void AptClient::mark_upgrade() {
-    if (impl->CacheFile.GetDepCache() == nullptr) return;
-    // Use APT::Upgrade::Upgrade which is the modern C++ equivalent of the algorithm wrappers
-    // Mode 0 = ALLOW_EVERYTHING (Dist-Upgrade equivalent)
-    APT::Upgrade::Upgrade(*impl->CacheFile.GetDepCache(), 0);
+    if (impl->CacheFile.GetDepCache())
+        APT::Upgrade::Upgrade(*impl->CacheFile.GetDepCache(), 0);
 }
 
 bool AptClient::resolve() {
-    if (impl->CacheFile.GetDepCache() == nullptr) return false;
-    return pkgFixBroken(*impl->CacheFile.GetDepCache());
+    return impl->CacheFile.GetDepCache() ? pkgFixBroken(*impl->CacheFile.GetDepCache()) : false;
 }
 
 int64_t AptClient::get_download_size() const {
-    if (impl->CacheFile.GetDepCache() == nullptr) return 0;
-    return impl->CacheFile.GetDepCache()->DebSize();
+    return impl->CacheFile.GetDepCache() ? impl->CacheFile.GetDepCache()->DebSize() : 0;
 }
 
 bool AptClient::commit_changes() {
+    // In a real scenario, this involves Acquire and PackageManager
+    // For this simulation/bridge:
     return true;
+}
+
+void AptClient::clean_cache() {
+    pkgAcquire Fetcher;
+    Fetcher.Clean("");
 }
 
 std::unique_ptr<AptClient> new_apt_client() {
