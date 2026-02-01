@@ -31,8 +31,8 @@ pub const LOGO: &str = r#"
 
 pub fn print_header() {
     println!("{}", LOGO.cyan().dimmed());
-    println!("   {}", "LEGENDARY ENGINE - APT NEXT GEN".white().bold());
-    println!("{}", "   ───────────────────────────────────".dimmed());
+    println!("   {}", "LEGENDARY - APT NEXT GEN".white().bold());
+    println!("{}", "   ────────────────────────".dimmed());
 }
 
 pub fn log_step(phase: &str, msg: String) {
