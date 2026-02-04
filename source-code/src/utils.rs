@@ -1,9 +1,11 @@
 use nix::unistd::Uid;
 
+#[allow(dead_code)]
 pub fn is_root() -> bool {
     Uid::effective().is_root()
 }
 
+#[allow(dead_code)]
 pub fn human_bytes(size: i64) -> String {
     let units = ["B", "KB", "MB", "GB", "TB"];
     let mut s = size as f64;
