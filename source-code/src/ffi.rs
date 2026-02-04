@@ -1,106 +1,87 @@
-use std::sync::Mutex;
-use lazy_static::lazy_static;
-use indicatif::{ProgressBar, ProgressStyle};
-use owo_colors::OwoColorize;
+use libc::{c_char, c_int, c_void, FILE};
 
-lazy_static! {
-    static ref GLOBAL_PB: Mutex<Option<ProgressBar>> = Mutex::new(None);
+#[repr(C)]
+pub struct Pool { _private: [u8; 0] }
+#[repr(C)]
+pub struct Repo { _private: [u8; 0] }
+#[repr(C)]
+pub struct Repodata { _private: [u8; 0] }
+#[repr(C)]
+pub struct Solver { _private: [u8; 0] }
+#[repr(C)]
+pub struct Transaction { _private: [u8; 0] }
+#[repr(C)]
+pub struct Queue {
+    pub elements: *mut c_int,
+    pub count: c_int,
+    pub alloc: c_int,
+    pub left: c_int,
 }
 
-pub fn init_progress_bar(len: u64, msg: &str) {
-    let pb = ProgressBar::new(len);
-    pb.set_style(ProgressStyle::default_bar()
-    .template("{spinner:.green} {prefix:.bold.blue} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-    .unwrap()
-    .progress_chars("━╸ "));
-    pb.set_message(msg.to_string());
-    *GLOBAL_PB.lock().unwrap() = Some(pb);
-}
+// Modern Libsolv Constants (0.7.x+)
+pub const SOLVER_INSTALL: c_int = 0xc000;
+pub const SOLVER_ERASE: c_int = 0xc100;
+pub const SOLVER_UPDATE: c_int = 0xc200;
 
-pub fn clear_progress_bar() {
-    let mut guard = GLOBAL_PB.lock().unwrap();
-    if let Some(pb) = guard.take() {
-        pb.finish_and_clear();
-    }
-}
+pub const SOLVER_SOLVABLE: c_int = 0x00;
+pub const SOLVER_SOLVABLE_NAME: c_int = 0x01;
+pub const SOLVER_SOLVABLE_PROVIDES: c_int = 0x02;
 
-// Callbacks exposed to C++
-fn raw_progress_report(percent: f32, msg: String) {
-    if let Some(pb) = GLOBAL_PB.lock().unwrap().as_ref() {
-        let len = pb.length().unwrap_or(100);
-        let pos = (percent / 100.0 * len as f32) as u64;
-        pb.set_position(pos);
-        pb.set_message(msg);
-    }
-}
+// Transaction Constants
+pub const SOLVER_TRANSACTION_SHOW_ALL: c_int = 1 << 4;
+pub const SOLVER_TRANSACTION_INSTALL: c_int = 11;
+pub const SOLVER_TRANSACTION_ERASE: c_int = 12;
+pub const SOLVER_TRANSACTION_UPGRADE: c_int = 13;
+pub const SOLVER_TRANSACTION_DOWNGRADE: c_int = 14;
 
-fn raw_phase_report(phase: String) {
-    if let Some(pb) = GLOBAL_PB.lock().unwrap().as_ref() {
-        pb.set_prefix(phase);
-    }
-}
+// Keys
+pub const SOLVABLE_NAME: c_int = 1;
+pub const SOLVABLE_ARCH: c_int = 2;
+pub const SOLVABLE_EVR: c_int = 3;
+pub const SOLVABLE_DESCRIPTION: c_int = 14;
+pub const SOLVABLE_DOWNLOADSIZE: c_int = 23;
+pub const SOLVABLE_CHECKSUM: c_int = 27;
 
-#[cxx::bridge(namespace = "legendary")]
-pub mod ffi {
-    struct PkgInfo {
-        name: String,
-        section: String,
-        version: String,
-        current_state: i64,
-        size: i64,
-    }
+extern "C" {
+    // Pool
+    pub fn pool_create() -> *mut Pool;
+    pub fn pool_free(pool: *mut Pool);
+    pub fn pool_setarch(pool: *mut Pool, arch: *const c_char);
+    pub fn pool_str2id(pool: *mut Pool, str: *const c_char, create: c_int) -> c_int;
+    pub fn pool_set_installed(pool: *mut Pool, repo: *mut Repo);
+    pub fn pool_createwhatprovides(pool: *mut Pool); // Critical for Name resolution
 
-    struct PkgDetails {
-        name: String,
-        version: String,
-        section: String,
-        maintainer: String,
-        description: String,
-        installed_size: i64,
-        download_size: i64,
-        dependencies: Vec<String>,
-    }
+    // Lookups
+    pub fn pool_id2str(pool: *mut Pool, id: c_int) -> *const c_char;
+    pub fn pool_lookup_str(pool: *mut Pool, solvid: c_int, key: c_int) -> *const c_char;
+    pub fn pool_lookup_num(pool: *mut Pool, solvid: c_int, key: c_int, notfound: u64) -> u64;
+    pub fn pool_lookup_checksum(pool: *mut Pool, solvid: c_int, key: c_int, type_id: *mut c_int) -> *const c_char;
 
-    struct TransactionSummary {
-        to_install: Vec<String>,
-        to_remove: Vec<String>,
-        to_upgrade: Vec<String>,
-    }
+    // Repo
+    pub fn repo_create(pool: *mut Pool, name: *const c_char) -> *mut Repo;
+    pub fn repo_add_debpackages(repo: *mut Repo, fp: *mut FILE, flags: c_int) -> c_int;
+    pub fn repo_internalize(repo: *mut Repo);
+    pub fn repo_add_solvable(repo: *mut Repo) -> c_int;
+    pub fn repo_add_repodata(repo: *mut Repo, flags: c_int) -> *mut Repodata;
 
-    extern "Rust" {
-        fn raw_progress_report(percent: f32, msg: String);
-        fn raw_phase_report(phase: String);
-    }
+    // Repodata
+    pub fn repodata_internalize(data: *mut Repodata);
+    pub fn repodata_set_str(data: *mut Repodata, solvid: c_int, key: c_int, str: *const c_char);
+    pub fn repodata_set_num(data: *mut Repodata, solvid: c_int, key: c_int, num: u64);
 
-    unsafe extern "C++" {
-        include!("legendary/src/apt_bridge.h");
+    // Solver
+    pub fn solver_create(pool: *mut Pool) -> *mut Solver;
+    pub fn solver_solve(solver: *mut Solver, job: *mut Queue) -> c_int;
+    pub fn solver_create_transaction(solver: *mut Solver) -> *mut Transaction;
+    pub fn solver_free(solver: *mut Solver);
 
-        type AptClient;
+    // Transaction
+    pub fn transaction_create_decisionq(trans: *mut Transaction, decisionq: *mut Queue, weakness: *mut c_void);
+    pub fn transaction_type(trans: *mut Transaction, solvid: c_int, mode: c_int) -> c_int;
+    pub fn transaction_free(trans: *mut Transaction);
 
-        fn new_apt_client() -> UniquePtr<AptClient>;
-        fn init(self: Pin<&mut AptClient>, with_lock: bool);
-        fn update_cache(self: Pin<&mut AptClient>);
-
-        fn list_all(self: Pin<&mut AptClient>) -> Vec<PkgInfo>;
-        fn search(self: Pin<&mut AptClient>, term: String) -> Vec<PkgInfo>;
-        fn find_package(self: Pin<&mut AptClient>, name: String) -> PkgInfo;
-        fn get_package_details(self: Pin<&mut AptClient>, name: String) -> PkgDetails;
-
-        fn mark_install(self: Pin<&mut AptClient>, name: String);
-        fn mark_remove(self: Pin<&mut AptClient>, name: String);
-        fn mark_auto(self: Pin<&mut AptClient>, name: String, is_auto: bool);
-
-        fn mark_upgrade(self: Pin<&mut AptClient>);
-        fn mark_full_upgrade(self: Pin<&mut AptClient>);
-        fn mark_autoremove(self: Pin<&mut AptClient>);
-
-        fn get_transaction_changes(self: Pin<&mut AptClient>) -> TransactionSummary;
-
-        fn resolve(self: Pin<&mut AptClient>) -> bool;
-        fn get_download_size(self: &AptClient) -> i64;
-        fn commit_changes(self: Pin<&mut AptClient>) -> bool;
-        fn clean_cache(self: Pin<&mut AptClient>);
-
-        fn get_last_error(self: Pin<&mut AptClient>) -> String;
-    }
+    // Queue
+    pub fn queue_init(q: *mut Queue);
+    pub fn queue_insert(q: *mut Queue, pos: c_int, id: c_int);
+    pub fn queue_free(q: *mut Queue);
 }
