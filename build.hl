@@ -1,5 +1,4 @@
-// odin
-// libapt-pkg6.0
+// cargo
 
 > cd source-code
 > cargo build --release
