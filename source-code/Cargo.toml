@@ -1,0 +1,34 @@
+[package]
+name = "legendary"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+indicatif = "0.17"
+resolvo = "0.6"
+reqwest = { version = "0.11", features = ["blocking", "gzip"] }
+flate2 = "1.0"
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+ar = "0.9"
+tar = "0.4"
+xz2 = "0.1"
+lazy_static = "1.4"
+sequoia-openpgp = "1.20"
+console = "0.15"
+prettytable-rs = "0.10"
+tokio = { version = "1.36", features = ["full"] }
+anyhow = "1.0"
+
+[[bin]]
+name = "legendary"
+path = "src/main.rs"
+
+[[bin]]
+name = "lpm"
+path = "src/main.rs"
