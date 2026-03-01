@@ -1,34 +1,82 @@
 [package]
-name = "legendary"
-version = "0.1.0"
+name = "lpm"
+version = "0.3.0"
 edition = "2021"
-
-[dependencies]
-clap = { version = "4.5", features = ["derive"] }
-indicatif = "0.17"
-resolvo = "0.6"
-reqwest = { version = "0.11", features = ["blocking", "gzip"] }
-flate2 = "1.0"
-regex = "1.10"
-serde = { version = "1.0", features = ["derive"] }
-serde_yaml = "0.9"
-rusqlite = { version = "0.31", features = ["bundled"] }
-sha2 = "0.10"
-hex = "0.4"
-ar = "0.9"
-tar = "0.4"
-xz2 = "0.1"
-lazy_static = "1.4"
-sequoia-openpgp = "1.20"
-console = "0.15"
-prettytable-rs = "0.10"
-tokio = { version = "1.36", features = ["full"] }
-anyhow = "1.0"
-
-[[bin]]
-name = "legendary"
-path = "src/main.rs"
+authors = ["HackerOS Team <hackeros068@gmail.com>"]
+description = "Legendary Package Manager – standalone Debian-compatible package manager"
+license = "GPL-3.0"
 
 [[bin]]
 name = "lpm"
 path = "src/main.rs"
+
+[dependencies]
+# CLI parsing
+lexopt       = "0.3"
+
+# Progress / spinners
+indicatif    = { version = "0.17", features = ["rayon"] }
+
+# Colors
+owo-colors   = { version = "3", features = ["supports-colors"] }
+
+# Async runtime
+tokio        = { version = "1", features = ["full"] }
+
+# HTTP
+reqwest      = { version = "0.12", features = ["stream", "gzip", "deflate"] }
+
+# Error handling
+anyhow       = "1"
+thiserror    = "1"
+
+# Serde
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+toml         = "0.8"
+
+# Compression
+flate2       = "1"
+bzip2        = "0.4"
+xz2          = "0.1"
+zstd         = "0.13"
+
+# Archive formats (.deb is ar + tar)
+tar          = "0.4"
+
+# Async streams
+futures-util = "0.3"
+
+# Hashing
+sha2         = "0.10"
+md-5         = "0.10"
+hex          = "0.4"
+
+# Human sizes
+bytesize     = "1"
+
+# Terminal width
+terminal_size = "0.3"
+
+# Temp files
+tempfile     = "3"
+
+# Date/time
+chrono       = { version = "0.4", features = ["serde"] }
+
+# Regex
+regex        = "1"
+once_cell    = "1"
+
+# SQLite – installed-packages database
+rusqlite     = { version = "0.31", features = ["bundled"] }
+
+# Glob
+glob         = "0.3"
+libc         = "0.2"
+
+[profile.release]
+opt-level    = 3
+lto          = true
+codegen-units = 1
+strip        = true
