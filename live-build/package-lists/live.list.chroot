@@ -1,0 +1,53 @@
+# Pakiety bazowe — instalowane przez apt podczas lb build
+# lpm będzie ich świadomy przez sync_from_dpkg()
+
+# System
+systemd
+systemd-sysv
+dbus
+udev
+bash
+coreutils
+util-linux
+procps
+findutils
+grep
+sed
+gawk
+
+# Sieć
+iproute2
+iputils-ping
+curl
+wget
+ca-certificates
+openssl
+
+# Filesystem
+e2fsprogs
+dosfstools
+parted
+
+# Sprzęt
+firmware-linux
+firmware-linux-nonfree
+pciutils
+usbutils
+
+# Użyteczne narzędzia
+less
+nano
+htop
+man-db
+sudo
+rsync
+tar
+gzip
+bzip2
+xz-utils
+zstd
+
+# Live system
+live-boot
+live-config
+live-config-systemd
