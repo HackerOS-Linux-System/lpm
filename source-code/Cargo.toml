@@ -2,7 +2,7 @@
 name = "lpm"
 version = "0.4.0"
 edition = "2021"
-authors = ["lpm contributors"]
+authors = ["HackerOS Team <hackeros068@gmail.com>"]
 description = "Legendary Package Manager – standalone Debian-compatible package manager"
 license = "GPL-3.0"
 
