@@ -1,3 +1,4 @@
+mod alternatives;
 mod apt_sources;
 mod cache;
 mod cli;
