@@ -8,6 +8,7 @@ use crate::db::{InstalledDb, InstallReason};
 use crate::deb::DebPackage;
 use crate::download;
 use crate::fs_install::{install_package, remove_package, InstallJob};
+use crate::log;
 use crate::solver::Solver;
 use crate::ui;
 
@@ -156,14 +157,14 @@ pub fn parse_args() -> Result<Command> {
 // ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_update() -> Result<()> {
+    log::info("command: update");
     let sources = SourcesList::load()?;
     if sources.entries.is_empty() {
         bail!("No repositories configured. Check /etc/apt/sources.list");
     }
-
     let client = download::HttpClient::new();
     PackageCache::update(&sources, &client).await?;
-
+    log::info("update complete");
     println!("{}", "Metadata cache created.".bold());
     Ok(())
 }
@@ -173,6 +174,7 @@ pub async fn cmd_update() -> Result<()> {
 // ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_install(names: &[String], assume_yes: bool, no_recommends: bool) -> Result<()> {
+    log::transaction_start("install", names);
     ui::last_metadata_check();
 
     let cache  = PackageCache::load()?;
@@ -185,8 +187,13 @@ pub async fn cmd_install(names: &[String], assume_yes: bool, no_recommends: bool
     if plan.is_empty() {
         ui::deps_resolved();
         ui::nothing_to_do();
+        log::info("install: nothing to do");
         return Ok(());
     }
+
+    let install_names: Vec<String> = plan.to_install.iter().map(|p| p.name.clone()).collect();
+    let upgrade_names: Vec<String> = plan.to_upgrade.iter().map(|p| p.name.clone()).collect();
+    log::info(&format!("plan: install={:?} upgrade={:?}", install_names, upgrade_names));
 
     ui::deps_resolved();
     ui::print_transaction_table(&plan, &arch);
@@ -194,6 +201,7 @@ pub async fn cmd_install(names: &[String], assume_yes: bool, no_recommends: bool
 
     if !assume_yes {
         if !ui::confirm("Is this ok")? {
+            log::info("install: aborted by user");
             println!("{}", "Operation aborted.".bold());
             return Ok(());
         }
@@ -201,21 +209,14 @@ pub async fn cmd_install(names: &[String], assume_yes: bool, no_recommends: bool
         println!("{}", "Running with -y, assuming yes.".dimmed());
     }
 
-    // ── Download ──────────────────────────────────────────────
-    let all_pkgs: Vec<_> = plan.to_install.iter()
-    .chain(plan.to_upgrade.iter())
-    .cloned()
-    .collect();
-
+    // Download
+    let all_pkgs: Vec<_> = plan.to_install.iter().chain(plan.to_upgrade.iter()).cloned().collect();
     let results = if !all_pkgs.is_empty() {
         println!();
         let client = download::HttpClient::new();
         download::download_packages(&client, &all_pkgs).await?
-    } else {
-        vec![]
-    };
+    } else { vec![] };
 
-    // ── Install ───────────────────────────────────────────────
     println!();
     ui::print_running_transaction();
 
@@ -236,29 +237,23 @@ pub async fn cmd_install(names: &[String], assume_yes: bool, no_recommends: bool
         let deb_bytes = std::fs::read(&dl.path)?;
         let deb       = DebPackage::parse(&deb_bytes)?;
         let job = InstallJob {
-            pkg: dl.package.clone(),
-            deb,
-            path: dl.path.clone(),
-            reason,
-            is_upgrade,
-            old_version,
+            pkg: dl.package.clone(), deb, path: dl.path.clone(),
+            reason, is_upgrade, old_version,
         };
         install_package(&job, &db)?;
     }
 
-    // Verifying pass (DNF always shows this)
     for (i, dl) in results.iter().enumerate() {
         let label = format!("{}-{}.{}", dl.package.name, dl.package.version, dl.package.architecture);
         ui::print_verify_step(&label, i + 1, total);
     }
 
-    // Summary
-    let installed: Vec<_> = plan.to_install.clone();
-    let upgraded:  Vec<_> = plan.to_upgrade.clone();
-    ui::print_installed_summary(&installed);
-    ui::print_upgraded_summary(&upgraded, &plan.upgrade_from);
+    ui::print_installed_summary(&plan.to_install);
+    ui::print_upgraded_summary(&plan.to_upgrade, &plan.upgrade_from);
     println!();
     ui::complete();
+
+    log::transaction_done("install", names);
     Ok(())
 }
 
@@ -267,6 +262,7 @@ pub async fn cmd_install(names: &[String], assume_yes: bool, no_recommends: bool
 // ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_remove(names: &[String], assume_yes: bool, purge: bool) -> Result<()> {
+    log::transaction_start("remove", names);
     ui::last_metadata_check();
 
     let cache  = PackageCache::load()?;
@@ -292,6 +288,7 @@ pub async fn cmd_remove(names: &[String], assume_yes: bool, purge: bool) -> Resu
 
     if !assume_yes {
         if !ui::confirm("Is this ok")? {
+            log::info("remove: aborted by user");
             println!("{}", "Operation aborted.".bold());
             return Ok(());
         }
@@ -305,7 +302,7 @@ pub async fn cmd_remove(names: &[String], assume_yes: bool, purge: bool) -> Resu
     for (i, name) in plan.to_remove.iter().enumerate() {
         let inst = match db.get(name) {
             Some(p) => p,
-            None    => { ui::warn(&format!("'{}' vanished from DB", name)); continue; }
+            None => { ui::warn(&format!("'{}' vanished from DB", name)); continue; }
         };
         let label = format!("{}-{}.{}", inst.name, inst.version, inst.architecture);
         ui::print_remove_step(&label, i + 1, total);
@@ -316,6 +313,8 @@ pub async fn cmd_remove(names: &[String], assume_yes: bool, purge: bool) -> Resu
     ui::print_removed_summary(&removed_names);
     println!();
     ui::complete();
+
+    log::transaction_done("remove", names);
     Ok(())
 }
 
@@ -324,6 +323,7 @@ pub async fn cmd_remove(names: &[String], assume_yes: bool, purge: bool) -> Resu
 // ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_upgrade(assume_yes: bool) -> Result<()> {
+    log::info("command: upgrade");
     ui::last_metadata_check();
 
     let cache  = PackageCache::load()?;
@@ -344,6 +344,7 @@ pub async fn cmd_upgrade(assume_yes: bool) -> Result<()> {
 
     if !assume_yes {
         if !ui::confirm("Is this ok")? {
+            log::info("upgrade: aborted by user");
             println!("{}", "Operation aborted.".bold());
             return Ok(());
         }
@@ -365,12 +366,8 @@ pub async fn cmd_upgrade(assume_yes: bool) -> Result<()> {
         let deb_bytes = std::fs::read(&dl.path)?;
         let deb       = DebPackage::parse(&deb_bytes)?;
         let job = InstallJob {
-            pkg: dl.package.clone(),
-            deb,
-            path: dl.path.clone(),
-            reason: InstallReason::User,
-            is_upgrade: true,
-            old_version,
+            pkg: dl.package.clone(), deb, path: dl.path.clone(),
+            reason: InstallReason::User, is_upgrade: true, old_version,
         };
         install_package(&job, &db)?;
     }
@@ -383,6 +380,7 @@ pub async fn cmd_upgrade(assume_yes: bool) -> Result<()> {
     ui::print_upgraded_summary(&plan.to_upgrade, &plan.upgrade_from);
     println!();
     ui::complete();
+    log::info("upgrade complete");
     Ok(())
 }
 
@@ -391,6 +389,7 @@ pub async fn cmd_upgrade(assume_yes: bool) -> Result<()> {
 // ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_autoremove(assume_yes: bool) -> Result<()> {
+    log::info("command: autoremove");
     ui::last_metadata_check();
 
     let cache  = PackageCache::load()?;
@@ -410,6 +409,7 @@ pub async fn cmd_autoremove(assume_yes: bool) -> Result<()> {
 
     if !assume_yes {
         if !ui::confirm("Is this ok")? {
+            log::info("autoremove: aborted");
             println!("{}", "Operation aborted.".bold());
             return Ok(());
         }
@@ -432,6 +432,7 @@ pub async fn cmd_autoremove(assume_yes: bool) -> Result<()> {
     ui::print_removed_summary(&removed);
     println!();
     ui::complete();
+    log::transaction_done("autoremove", &removed);
     Ok(())
 }
 
@@ -440,13 +441,12 @@ pub async fn cmd_autoremove(assume_yes: bool) -> Result<()> {
 // ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_search(query: &str, installed_only: bool) -> Result<()> {
+    log::info(&format!("search: {}", query));
     let cache = PackageCache::load()?;
     let db    = InstalledDb::open()?;
 
     let mut results: Vec<_> = cache.search(query);
-    if installed_only {
-        results.retain(|p| db.is_installed(&p.name));
-    }
+    if installed_only { results.retain(|p| db.is_installed(&p.name)); }
 
     if results.is_empty() {
         println!("{}", "No matches found.".bold());
@@ -457,7 +457,6 @@ pub async fn cmd_search(query: &str, installed_only: bool) -> Result<()> {
     for pkg in &results {
         ui::print_search_result(pkg, db.is_installed(&pkg.name));
     }
-
     Ok(())
 }
 
@@ -466,10 +465,10 @@ pub async fn cmd_search(query: &str, installed_only: bool) -> Result<()> {
 // ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_info(package: &str) -> Result<()> {
+    log::info(&format!("info: {}", package));
     let cache = PackageCache::load()?;
     let db    = InstalledDb::open()?;
 
-    // Keep owned copy of the DB version so it lives long enough
     let from_db: Option<crate::package::Package> = db.get(package).map(|inst| {
         crate::package::Package {
             name:              inst.name,
@@ -479,28 +478,24 @@ pub async fn cmd_info(package: &str) -> Result<()> {
             section:           inst.section,
             maintainer:        inst.maintainer,
             installed_size_kb: Some(inst.installed_size_kb),
-                                                                       depends:           inst.depends,
-                                                                       recommends:        inst.recommends,
-                                                                       ..Default::default()
+            depends:           inst.depends,
+            recommends:        inst.recommends,
+            ..Default::default()
         }
     });
 
     let pkg: Option<&crate::package::Package> = cache
-    .get(package)
-    .or_else(|| from_db.as_ref());
+        .get(package)
+        .or_else(|| from_db.as_ref());
 
     match pkg {
-        None => bail!(
-            "No package named '{}' found.\n  Hint: try `lpm search {}`",
-            package, package
-        ),
+        None => bail!("No package named '{}' found.\n  Hint: try `lpm search {}`", package, package),
         Some(p) => {
             let is_installed  = db.is_installed(package);
             let installed_ver = db.get(package).map(|i| i.version.clone());
             ui::print_package_info(p, is_installed, installed_ver.as_deref());
         }
     }
-
     Ok(())
 }
 
@@ -514,25 +509,21 @@ pub async fn cmd_list(installed: bool, upgradeable: bool, _available: bool) -> R
 
     if upgradeable {
         let upgrades: Vec<_> = db.list_all()?
-        .into_iter()
-        .filter_map(|p| {
-            let avail = cache.get(&p.name)?;
-            if crate::package::version_cmp(&avail.version, &p.version)
-                == std::cmp::Ordering::Greater
-                {
+            .into_iter()
+            .filter_map(|p| {
+                let avail = cache.get(&p.name)?;
+                if crate::package::version_cmp(&avail.version, &p.version) == std::cmp::Ordering::Greater {
                     Some((p, avail.clone()))
-                } else {
-                    None
-                }
-        })
-        .collect();
+                } else { None }
+            })
+            .collect();
 
         if upgrades.is_empty() {
             println!("{}", "No packages marked for upgrade.".bold());
         } else {
             for (inst, avail) in &upgrades {
                 let repo = avail.repo_base_uri.as_deref()
-                .unwrap_or("").trim_end_matches('/').split('/').last().unwrap_or("unknown");
+                    .unwrap_or("").trim_end_matches('/').split('/').last().unwrap_or("unknown");
                 ui::print_list_entry(
                     &inst.name, &inst.version, &inst.architecture,
                     true, repo, Some(&avail.version),
@@ -544,9 +535,7 @@ pub async fn cmd_list(installed: bool, upgradeable: bool, _available: bool) -> R
             let new_ver = cache.get(&p.name).and_then(|a| {
                 if crate::package::version_cmp(&a.version, &p.version) == std::cmp::Ordering::Greater {
                     Some(a.version.clone())
-                } else {
-                    None
-                }
+                } else { None }
             });
             ui::print_list_entry(
                 &p.name, &p.version, &p.architecture,
@@ -555,16 +544,15 @@ pub async fn cmd_list(installed: bool, upgradeable: bool, _available: bool) -> R
         }
     } else {
         for p in cache.all_packages() {
-            let installed = db.is_installed(&p.name);
+            let is_inst = db.is_installed(&p.name);
             let repo = p.repo_base_uri.as_deref()
-            .unwrap_or("").trim_end_matches('/').split('/').last().unwrap_or("unknown");
+                .unwrap_or("").trim_end_matches('/').split('/').last().unwrap_or("unknown");
             ui::print_list_entry(
                 &p.name, &p.version, &p.architecture,
-                installed, repo, None,
+                is_inst, repo, None,
             );
         }
     }
-
     Ok(())
 }
 
@@ -573,6 +561,7 @@ pub async fn cmd_list(installed: bool, upgradeable: bool, _available: bool) -> R
 // ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_clean() -> Result<()> {
+    log::info("command: clean");
     let dir = std::path::Path::new(download::DL_DIR);
     let mut freed = 0u64;
     let mut count = 0u32;
@@ -583,7 +572,10 @@ pub async fn cmd_clean() -> Result<()> {
             let path  = entry.path();
             if path.extension().map_or(false, |e| e == "deb" || e == "part") {
                 freed += entry.metadata().map(|m| m.len()).unwrap_or(0);
-                if std::fs::remove_file(&path).is_ok() { count += 1; }
+                if std::fs::remove_file(&path).is_ok() {
+                    log::file_op("clean", &path.to_string_lossy());
+                    count += 1;
+                }
             }
         }
     }
@@ -591,7 +583,7 @@ pub async fn cmd_clean() -> Result<()> {
     println!(
         "{} files removed, {} freed.",
         count.to_string().bold(),
-             ui::human_size(freed).yellow().bold()
+        ui::human_size(freed).yellow().bold()
     );
     Ok(())
 }
@@ -603,12 +595,10 @@ pub async fn cmd_clean() -> Result<()> {
 pub async fn cmd_history() -> Result<()> {
     let db      = InstalledDb::open()?;
     let entries = db.history(50)?;
-
     if entries.is_empty() {
         println!("{}", "No transaction history.".bold());
         return Ok(());
     }
-
     ui::print_history(&entries);
     Ok(())
 }
@@ -621,69 +611,63 @@ pub fn print_version() {
     println!(
         "{} {} — Legendary Package Manager",
         "lpm".bold().bright_magenta(),
-             env!("CARGO_PKG_VERSION").bold()
+        env!("CARGO_PKG_VERSION").bold()
     );
     println!("Standalone Debian-compatible. No apt/dpkg required.");
+    println!("Log file: {}", crate::log::LOG_FILE.cyan());
 }
 
 pub fn print_help() {
     println!();
-    println!(
-        "{}  {}",
-        "lpm".bold().bright_magenta(),
-             "— Legendary Package Manager".bold()
-    );
-    println!("  Standalone Debian-compatible package manager. No apt/dpkg required.");
+    println!("{} {}", "lpm".bold().bright_magenta(), "— Legendary Package Manager".bold());
+    println!("  Standalone Debian-compatible. No apt/dpkg required.");
     println!();
     println!("{}", "Usage:".bold().yellow());
     println!("  {} {} [OPTIONS]", "lpm".bold(), "<command>".cyan());
     println!();
     println!("{}", "Package management:".bold().yellow());
-    let cmds: &[(&str, &str)] = &[
+    for (c, d) in &[
         ("install <pkg...>",  "Install packages and dependencies"),
         ("remove  <pkg...>",  "Remove packages"),
         ("upgrade",           "Upgrade all installed packages"),
         ("autoremove",        "Remove unneeded dependencies"),
-    ];
-    for (c, d) in cmds {
+    ] {
         println!("  {:<35} {}", c.cyan(), d.dimmed());
     }
     println!();
     println!("{}", "Repositories and cache:".bold().yellow());
-    let cmds2: &[(&str, &str)] = &[
-        ("update",            "Refresh package metadata"),
-        ("clean",             "Remove cached package files"),
-    ];
-    for (c, d) in cmds2 {
+    for (c, d) in &[
+        ("update",  "Refresh package metadata"),
+        ("clean",   "Remove cached package files"),
+    ] {
         println!("  {:<35} {}", c.cyan(), d.dimmed());
     }
     println!();
     println!("{}", "Query:".bold().yellow());
-    let cmds3: &[(&str, &str)] = &[
-        ("search <query>",             "Search package names and descriptions"),
-        ("info   <package>",           "Show package details"),
-        ("list [--installed|--upgrades]", "List packages"),
-        ("history",                    "Show transaction history"),
-    ];
-    for (c, d) in cmds3 {
+    for (c, d) in &[
+        ("search <query>",               "Search package names and descriptions"),
+        ("info   <package>",             "Show package details"),
+        ("list [--installed|--upgrades]","List packages"),
+        ("history",                      "Show transaction history"),
+    ] {
         println!("  {:<35} {}", c.cyan(), d.dimmed());
     }
     println!();
     println!("{}", "Options:".bold().yellow());
-    let opts: &[(&str, &str)] = &[
+    for (o, d) in &[
         ("-y, --yes",               "Assume yes"),
         ("--purge",                 "Remove config files too"),
         ("--no-install-recommends", "Skip recommended packages"),
         ("--installed",             "Filter to installed (list/search)"),
         ("--upgrades",              "Show upgradeable only (list)"),
-    ];
-    for (o, d) in opts {
+    ] {
         println!("  {:<35} {}", o.cyan(), d.dimmed());
     }
     println!();
     println!("{}", "Config:".bold().yellow());
-    println!("  {} {}", "Repos:".dimmed(), "/etc/apt/sources.list  or  /etc/lpm/sources-list.toml".cyan());
-    println!("  {}  {}", "DB:".dimmed(),   "/var/lib/lpm/lpm.db".cyan());
-    println!("  {}   {}", "Cache:".dimmed(), "/var/cache/lpm/archives/".cyan());
+    println!("  {:<12} {}", "Repos:".dimmed(), "/etc/apt/sources.list  or  /etc/lpm/sources-list.toml".cyan());
+    println!("  {:<12} {}", "DB:".dimmed(),    "/var/lib/lpm/lpm.db".cyan());
+    println!("  {:<12} {}", "Cache:".dimmed(), "/var/cache/lpm/archives/".cyan());
+    println!("  {:<12} {}", "Log:".dimmed(),   crate::log::LOG_FILE.cyan());
     println!();
 }
