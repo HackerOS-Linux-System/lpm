@@ -1,0 +1,124 @@
+#!/bin/bash
+# Hook: tworzy wrapper który kieruje komendy apt/apt-get do lpm
+# Użytkownicy mogą używać zarówno "apt install foo" jak i "lpm install foo"
+set -e
+
+LPM_BINARY="/usr/local/bin/lpm"
+
+if [ ! -x "$LPM_BINARY" ]; then
+    echo "[apt-bridge] lpm not found, skipping apt bridge."
+    exit 0
+fi
+
+echo "[apt-bridge] Installing apt→lpm bridge..."
+
+# Wrapper: /usr/local/bin/apt  (ma wyższy priorytet niż /usr/bin/apt)
+cat > /usr/local/bin/apt-lpm << 'WRAPPER'
+#!/bin/bash
+# apt→lpm bridge — tłumaczy komendy apt na lpm
+# Oryginalne apt nadal dostępne jako /usr/bin/apt
+
+LPM=/usr/local/bin/lpm
+
+# Jeśli lpm nie istnieje — fallback na systemowe apt
+if [ ! -x "$LPM" ]; then
+    exec /usr/bin/apt "$@"
+fi
+
+# Tłumacz składnię apt na lpm
+CMD="$1"
+shift
+
+case "$CMD" in
+    install)
+        exec "$LPM" install "$@"
+        ;;
+    remove|purge)
+        if [ "$CMD" = "purge" ]; then
+            exec "$LPM" remove --purge "$@"
+        else
+            exec "$LPM" remove "$@"
+        fi
+        ;;
+    update)
+        exec "$LPM" update "$@"
+        ;;
+    upgrade|dist-upgrade|full-upgrade)
+        exec "$LPM" upgrade "$@"
+        ;;
+    autoremove|auto-remove)
+        exec "$LPM" autoremove "$@"
+        ;;
+    search)
+        exec "$LPM" search "$@"
+        ;;
+    show|info)
+        exec "$LPM" info "$@"
+        ;;
+    list)
+        exec "$LPM" list "$@"
+        ;;
+    clean|autoclean)
+        exec "$LPM" clean
+        ;;
+    # Komendy apt bez odpowiednika w lpm — fallback na systemowe apt
+    source|build-dep|download|changelog|policy|depends|rdepends)
+        echo "[apt-lpm] Falling back to system apt for: $CMD"
+        exec /usr/bin/apt "$CMD" "$@"
+        ;;
+    *)
+        # Nieznana komenda — spróbuj lpm, fallback na apt
+        if "$LPM" help 2>/dev/null | grep -q "^  $CMD"; then
+            exec "$LPM" "$CMD" "$@"
+        else
+            exec /usr/bin/apt "$CMD" "$@"
+        fi
+        ;;
+esac
+WRAPPER
+chmod +x /usr/local/bin/apt-lpm
+
+# Wrapper dla apt-get
+cat > /usr/local/bin/apt-get-lpm << 'WRAPPER'
+#!/bin/bash
+# apt-get→lpm bridge
+LPM=/usr/local/bin/lpm
+[ ! -x "$LPM" ] && exec /usr/bin/apt-get "$@"
+
+CMD="$1"; shift
+
+# Filtruj flagi apt-get które lpm nie rozumie
+ARGS=()
+ASSUME_YES=false
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes|--assume-yes) ASSUME_YES=true; ARGS+=("-y") ;;
+        -q|--quiet|-qq)        ;; # ignoruj
+        --no-install-recommends) ARGS+=("--no-install-recommends") ;;
+        --purge)               ARGS+=("--purge") ;;
+        -*)                    ;; # ignoruj inne flagi
+        *)                     ARGS+=("$arg") ;;
+    esac
+done
+
+case "$CMD" in
+    install)       exec "$LPM" install "${ARGS[@]}" ;;
+    remove)        exec "$LPM" remove  "${ARGS[@]}" ;;
+    purge)         exec "$LPM" remove --purge "${ARGS[@]}" ;;
+    update)        exec "$LPM" update ;;
+    upgrade)       exec "$LPM" upgrade "${ARGS[@]}" ;;
+    dist-upgrade)  exec "$LPM" upgrade "${ARGS[@]}" ;;
+    autoremove)    exec "$LPM" autoremove "${ARGS[@]}" ;;
+    clean)         exec "$LPM" clean ;;
+    autoclean)     exec "$LPM" clean ;;
+    *)             exec /usr/bin/apt-get "$CMD" "$@" ;;
+esac
+WRAPPER
+chmod +x /usr/local/bin/apt-get-lpm
+
+echo "[apt-bridge] Bridge scripts created:"
+echo "  /usr/local/bin/apt-lpm     (use as drop-in for apt)"
+echo "  /usr/local/bin/apt-get-lpm (use as drop-in for apt-get)"
+echo ""
+echo "[apt-bridge] To activate as default, add to your hook:"
+echo "  update-alternatives --install /usr/bin/apt apt /usr/local/bin/apt-lpm 100"
