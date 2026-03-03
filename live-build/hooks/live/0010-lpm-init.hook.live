@@ -1,0 +1,12 @@
+#!/bin/bash
+# Hook live: inicjalizacja lpm przy starcie live session
+set -e
+
+[ -x /usr/local/bin/lpm ] || exit 0
+
+echo "[lpm-live] Initializing lpm for live session..."
+
+# Sync dpkg state (live system ma już zainstalowane pakiety przez live-build)
+lpm update 2>/dev/null || true
+
+echo "[lpm-live] Ready. Try: lpm list --installed"
