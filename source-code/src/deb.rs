@@ -11,6 +11,9 @@ use crate::package::Package;
 pub struct DebPackage {
     pub control:          Package,
     pub control_raw:      String,
+    /// The raw (compressed) control.tar bytes — needed to extract maintainer scripts
+    pub control_tar:      Vec<u8>,
+    pub control_comp:     Compression,
     pub data_bytes:       Vec<u8>,
     pub data_compression: Compression,
     /// Regular files only — used for DB file tracking
@@ -27,10 +30,12 @@ impl DebPackage {
             bail!("Not a valid .deb file (bad ar magic)");
         }
 
-        let mut control_raw = String::new();
-        let mut data_bytes  = Vec::new();
-        let mut data_comp   = Compression::None;
-        let mut pos         = 8usize;
+        let mut control_raw  = String::new();
+        let mut control_tar  = Vec::new();
+        let mut control_comp = Compression::None;
+        let mut data_bytes   = Vec::new();
+        let mut data_comp    = Compression::None;
+        let mut pos          = 8usize;
 
         while pos + 60 <= deb_bytes.len() {
             let header   = &deb_bytes[pos..pos + 60];
@@ -49,10 +54,11 @@ impl DebPackage {
             match name_raw {
                 "debian-binary" => {}
                 n if n.starts_with("control.tar") => {
-                    let comp  = comp_from_name(n);
-                    let tar   = decompress(member, comp)
+                    control_comp = comp_from_name(n);
+                    control_tar  = member.to_vec();
+                    let tar      = decompress(member, control_comp)
                     .with_context(|| format!("Decompressing {}", n))?;
-                    control_raw = extract_control(&tar)
+                    control_raw  = extract_control_file(&tar)
                     .context("Extracting ./control")?;
                 }
                 n if n.starts_with("data.tar") => {
@@ -72,14 +78,38 @@ impl DebPackage {
         let control   = Package::parse_block(&control_raw).context("Parsing control")?;
         let file_list = list_regular_files(&data_bytes, data_comp).unwrap_or_default();
 
-        Ok(DebPackage { control, control_raw, data_bytes, data_compression: data_comp, file_list })
+        Ok(DebPackage {
+            control, control_raw,
+            control_tar, control_comp,
+            data_bytes, data_compression: data_comp,
+            file_list,
+        })
     }
 
-    /// Extract the data tarball into `root`.
-    ///
+    /// Extract a maintainer script (preinst/postinst/prerm/postrm) from control.tar.
+    /// Returns the script content as a String, or None if not present.
+    pub fn extract_script(&self, name: &str) -> Option<String> {
+        let tar = decompress(&self.control_tar, self.control_comp).ok()?;
+        let mut archive = tar::Archive::new(Cursor::new(tar));
+
+        for entry in archive.entries().ok()? {
+            let mut entry  = entry.ok()?;
+            let path       = entry.path().ok()?;
+            let entry_name = path.to_string_lossy();
+
+            if entry_name == format!("./{}", name) || entry_name == name {
+                let mut s = String::new();
+                entry.read_to_string(&mut s).ok()?;
+                return Some(s);
+            }
+        }
+        None
+    }
+
+    /// Extract all data files into `root`.
     /// Returns `(regular_files, all_extracted)`:
-    ///   - `regular_files`: only regular files + hard links → stored in DB for removal
-    ///   - `all_extracted`:  everything including symlinks → used by fix_alternatives
+    ///   - regular_files: only regular files + hard links → stored in DB
+    ///   - all_extracted: everything including symlinks → used by fix_alternatives
     pub fn extract_data(&self, root: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
         let tar = decompress(&self.data_bytes, self.data_compression)
         .context("Decompressing data.tar")?;
@@ -88,7 +118,7 @@ impl DebPackage {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Decompression
+//  Compression
 // ─────────────────────────────────────────────────────────────
 
 fn comp_from_name(name: &str) -> Compression {
@@ -99,7 +129,7 @@ fn comp_from_name(name: &str) -> Compression {
     else                           { Compression::None }
 }
 
-fn decompress(bytes: &[u8], comp: Compression) -> Result<Vec<u8>> {
+pub fn decompress(bytes: &[u8], comp: Compression) -> Result<Vec<u8>> {
     match comp {
         Compression::Gz => {
             let mut d = flate2::read::GzDecoder::new(bytes);
@@ -125,7 +155,7 @@ fn decompress(bytes: &[u8], comp: Compression) -> Result<Vec<u8>> {
 //  Control extraction
 // ─────────────────────────────────────────────────────────────
 
-fn extract_control(tar_bytes: &[u8]) -> Result<String> {
+fn extract_control_file(tar_bytes: &[u8]) -> Result<String> {
     let mut a = tar::Archive::new(Cursor::new(tar_bytes));
     for entry in a.entries()? {
         let mut e = entry?;
@@ -140,13 +170,13 @@ fn extract_control(tar_bytes: &[u8]) -> Result<String> {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  File listing (for DB tracking)
+//  File listing
 // ─────────────────────────────────────────────────────────────
 
 fn list_regular_files(bytes: &[u8], comp: Compression) -> Result<Vec<String>> {
     let tar = decompress(bytes, comp)?;
     let mut archive = tar::Archive::new(Cursor::new(tar));
-    let mut files = Vec::new();
+    let mut files   = Vec::new();
 
     for entry in archive.entries()? {
         let entry = entry?;
@@ -168,8 +198,8 @@ fn list_regular_files(bytes: &[u8], comp: Compression) -> Result<Vec<String>> {
 
 fn extract_tar(root: &Path, tar_bytes: &[u8]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let mut archive  = tar::Archive::new(Cursor::new(tar_bytes));
-    let mut regular  = Vec::new(); // regular files + hard links
-    let mut all_extr = Vec::new(); // everything we touched (incl. symlinks)
+    let mut regular  = Vec::new();
+    let mut all_extr = Vec::new();
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -185,9 +215,7 @@ fn extract_tar(root: &Path, tar_bytes: &[u8]) -> Result<(Vec<PathBuf>, Vec<PathB
         match entry.header().entry_type() {
             EntryType::Directory => {
                 std::fs::create_dir_all(&dest)?;
-                // Don't track directories
             }
-
             EntryType::Regular | EntryType::Continuous => {
                 if let Some(p) = dest.parent() { std::fs::create_dir_all(p)?; }
                 entry.unpack(&dest)
@@ -195,30 +223,21 @@ fn extract_tar(root: &Path, tar_bytes: &[u8]) -> Result<(Vec<PathBuf>, Vec<PathB
                 regular.push(dest.clone());
                 all_extr.push(dest);
             }
-
             EntryType::Symlink => {
                 if let Some(target) = entry.link_name()? {
                     if let Some(p) = dest.parent() { std::fs::create_dir_all(p)?; }
-                    // Remove any existing file/symlink at this path
                     let _ = std::fs::remove_file(&dest);
-                    // Create the symlink
                     std::os::unix::fs::symlink(&*target, &dest).ok();
-                    // Track symlinks so fix_alternatives can inspect them
                     all_extr.push(dest);
                 }
             }
-
             EntryType::Link => {
-                // Hard link: unpack creates the hard link
                 if let Some(p) = dest.parent() { std::fs::create_dir_all(p)?; }
                 entry.unpack(&dest).ok();
                 regular.push(dest.clone());
                 all_extr.push(dest);
             }
-
-            _ => {
-                // char/block devices, FIFOs — skip
-            }
+            _ => {}
         }
     }
 
