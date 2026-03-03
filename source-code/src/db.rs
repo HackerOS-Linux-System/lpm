@@ -234,7 +234,7 @@ impl InstalledDb {
     }
 
     pub fn record_remove(&self, name: &str, version: &str) -> Result<()> {
-        let files = self.get(name)
+        let _files = self.get(name)
         .map(|p| p.files.split(';').map(|s| s.to_owned()).collect::<Vec<_>>())
         .unwrap_or_default();
 
