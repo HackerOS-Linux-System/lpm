@@ -1,0 +1,11 @@
+*.toml linguist-detectable=true
+*.toml linguist-documentation=false
+*.toml linguist-language=TOML
+
+*.chroot linguist-detectable=true
+*.chroot linguist-documentation=false
+*.chroot linguist-language=SHELL
+
+*.live linguist-detectable=true
+*.live linguist-documentation=false
+*.live linguist-language=SHELL
