@@ -1,8 +1,8 @@
 [package]
 name = "lpm"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-authors = ["HackerOS Team <hackeros068@gmail.com>"]
+authors = ["lpm contributors"]
 description = "Legendary Package Manager – standalone Debian-compatible package manager"
 license = "GPL-3.0"
 
@@ -62,7 +62,7 @@ terminal_size = "0.3"
 tempfile     = "3"
 
 # Date/time
-chrono       = { version = "0.4", features = ["serde"] }
+chrono       = { version = "0.4", features = ["serde", "clock"] }
 
 # Regex
 regex        = "1"
