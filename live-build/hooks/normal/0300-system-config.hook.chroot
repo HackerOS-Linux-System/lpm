@@ -1,0 +1,91 @@
+#!/bin/bash
+set -e
+echo "[system-config] Configuring MyDistro..."
+
+# ── MOTD ─────────────────────────────────────────────────────
+cat > /etc/motd << 'MOTD'
+
+  ███╗   ███╗██╗   ██╗██████╗ ██╗███████╗████████╗██████╗  ██████╗
+  ████╗ ████║╚██╗ ██╔╝██╔══██╗██║██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗
+  ██╔████╔██║ ╚████╔╝ ██║  ██║██║███████╗   ██║   ██████╔╝██║   ██║
+  ██║╚██╔╝██║  ╚██╔╝  ██║  ██║██║╚════██║   ██║   ██╔══██╗██║   ██║
+  ██║ ╚═╝ ██║   ██║   ██████╔╝██║███████║   ██║   ██║  ██║╚██████╔╝
+  ╚═╝     ╚═╝   ╚═╝   ╚═════╝ ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝
+        Powered by lpm — Legendary Package Manager
+
+  Package manager : lpm (run: lpm help)
+  System info     : neofetch / fastfetch
+  Log             : /tmp/lpm.log
+
+MOTD
+
+# ── /etc/os-release ───────────────────────────────────────────
+cat > /etc/os-release << 'OSREL'
+PRETTY_NAME="MyDistro 1.0 (testing)"
+NAME="MyDistro"
+VERSION_ID="1.0"
+VERSION="1.0 (testing)"
+ID=mydistro
+ID_LIKE=debian
+HOME_URL="https://github.com/yourname/mydistro"
+SUPPORT_URL="https://github.com/yourname/mydistro/issues"
+BUG_REPORT_URL="https://github.com/yourname/mydistro/issues"
+VERSION_CODENAME=testing
+OSREL
+
+# ── /etc/issue ────────────────────────────────────────────────
+echo "MyDistro 1.0 \n \l" > /etc/issue
+echo "MyDistro 1.0"       > /etc/issue.net
+
+# ── /etc/hostname ─────────────────────────────────────────────
+echo "mydistro" > /etc/hostname
+
+# ── profile.d: pokazuj hint o lpm przy logowaniu ──────────────
+cat > /etc/profile.d/lpm-hint.sh << 'PROFILE'
+# lpm package manager hint
+if command -v lpm >/dev/null 2>&1; then
+    LPM_LOG=/tmp/lpm.log
+    echo "  Package manager: lpm $(lpm version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)"
+    if [ -f "$LPM_LOG" ]; then
+        LAST=$(tail -1 "$LPM_LOG" 2>/dev/null)
+        [ -n "$LAST" ] && echo "  Last lpm action: $LAST"
+    fi
+fi
+PROFILE
+
+# ── bash completion dla lpm ───────────────────────────────────
+mkdir -p /etc/bash_completion.d
+cat > /etc/bash_completion.d/lpm << 'COMPLETION'
+# bash completion for lpm
+_lpm_completion() {
+    local cur prev words
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    local commands="install remove update upgrade autoremove search info list clean history version help"
+    local global_opts="-y --yes --no-install-recommends --purge --installed --upgrades"
+
+    if [ $COMP_CWORD -eq 1 ]; then
+        COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+        return 0
+    fi
+
+    case "$prev" in
+        install|remove|info|show)
+            # autocomplete z cache pakietów
+            if [ -d /var/lib/lpm/lists ]; then
+                local pkgs=$(grep -h "^Package: " /var/lib/lpm/lists/*.pkgs 2>/dev/null \
+                             | awk '{print $2}' | sort -u)
+                COMPREPLY=($(compgen -W "$pkgs" -- "$cur"))
+            fi
+            ;;
+        *)
+            COMPREPLY=($(compgen -W "$global_opts" -- "$cur"))
+            ;;
+    esac
+}
+complete -F _lpm_completion lpm
+COMPLETION
+
+echo "[system-config] Done."
