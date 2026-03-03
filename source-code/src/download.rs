@@ -12,7 +12,7 @@ pub const DL_DIR: &str = "/var/cache/lpm/archives";
 
 const USER_AGENT: &str = concat!(
     "lpm/", env!("CARGO_PKG_VERSION"),
-                                 " (Legendary Package Manager; +https://github.com/lpm-rs/lpm)"
+                                 " (Legendary Package Manager; +https://github.com/HackerOS-Linux-System/lpm/)"
 );
 
 // ─────────────────────────────────────────────────────────────
