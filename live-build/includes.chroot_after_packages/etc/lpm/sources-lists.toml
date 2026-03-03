@@ -1,0 +1,35 @@
+# /etc/lpm/sources-list.toml
+# Repozytoria lpm dla MyDistro (Debian testing based)
+
+[[repo]]
+name       = "debian-testing-main"
+enabled    = true
+baseurl    = "http://deb.debian.org/debian"
+suite      = "testing"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+
+[[repo]]
+name       = "debian-testing-security"
+enabled    = true
+baseurl    = "http://security.debian.org/debian-security"
+suite      = "testing-security"
+components = ["main", "contrib", "non-free"]
+arch       = ["amd64"]
+
+[[repo]]
+name       = "debian-testing-updates"
+enabled    = true
+baseurl    = "http://deb.debian.org/debian"
+suite      = "testing-updates"
+components = ["main", "contrib", "non-free"]
+arch       = ["amd64"]
+
+# Backports (domyślnie wyłączone)
+[[repo]]
+name       = "debian-testing-backports"
+enabled    = false
+baseurl    = "http://deb.debian.org/debian"
+suite      = "testing-backports"
+components = ["main", "contrib", "non-free"]
+arch       = ["amd64"]
