@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::alternatives::{fix_alternatives, needs_ldconfig, run_ldconfig};
 use crate::db::{InstalledDb, InstalledPackage, InstallReason};
 use crate::deb::DebPackage;
+use crate::log;
 use crate::package::Package;
 
 pub const INSTALL_ROOT: &str = "/";
@@ -27,39 +29,54 @@ pub fn install_package(job: &InstallJob, db: &InstalledDb) -> Result<()> {
     let root = Path::new(INSTALL_ROOT);
     let pkg  = &job.pkg;
 
-    let script_arg     = job.old_version.as_deref().unwrap_or("");
-    let preinst_action = if job.is_upgrade { "upgrade" } else { "install" };
-    run_maintainer_script(&job.deb, "preinst", &[preinst_action, script_arg]);
+    log::pkg(
+        if job.is_upgrade { "upgrade" } else { "install" },
+            &pkg.name, &pkg.version,
+    );
 
-    // Extract all files (Regular + Symlinks + HardLinks)
-    // `written` contains only regular files and hard links (not dirs, not symlinks)
+    let old_ver    = job.old_version.as_deref().unwrap_or("");
+    let action_arg = if job.is_upgrade { "upgrade" } else { "install" };
+
+    // ── preinst ───────────────────────────────────────────────
+    run_maintainer_script(&job.deb, "preinst", &[action_arg, old_ver]);
+
+    // ── Extract data.tar ──────────────────────────────────────
     let (written, all_paths) = job.deb.extract_data(root)
-    .with_context(|| format!("Extracting data from {}", pkg.name))?;
+    .with_context(|| format!("Extracting {}", pkg.name))?;
 
-    // Fix /etc/alternatives/* broken symlinks that postinst would have created
-    fix_alternatives(&all_paths);
+    log::info(&format!("extracted {} files for {}", written.len(), pkg.name));
 
-    // Set executable permissions on bin files
+    // ── postinst ──────────────────────────────────────────────
+    // Run BEFORE fix_alternatives so update-alternatives in postinst
+    // creates /etc/alternatives/* properly.
+    let postinst_ran = run_maintainer_script(&job.deb, "postinst", &["configure", old_ver]);
+
+    // ── fix_alternatives fallback ─────────────────────────────
+    // If postinst didn't run (or failed), fix any broken alternatives ourselves.
+    if !postinst_ran {
+        fix_alternatives(&all_paths);
+    }
+
+    // ── Permissions + ldconfig ────────────────────────────────
     fix_permissions(&written);
 
-    // Run ldconfig if we installed shared libraries
     if needs_ldconfig(&written) {
+        log::info("running ldconfig");
         run_ldconfig();
     }
 
-    run_maintainer_script(&job.deb, "postinst", &["configure", script_arg]);
-
-    // Only track regular files in DB (for clean removal)
+    // ── Record in DB ─────────────────────────────────────────
     let file_paths: Vec<String> = written
     .iter()
     .map(|p| p.to_string_lossy().to_string())
     .collect();
 
     if job.is_upgrade {
-        let old = job.old_version.as_deref().unwrap_or("0");
-        db.record_upgrade(old, pkg, &file_paths)?;
+        db.record_upgrade(old_ver, pkg, &file_paths)?;
+        log::info(&format!("upgraded {} {} -> {}", pkg.name, old_ver, pkg.version));
     } else {
         db.record_install(pkg, job.reason, &file_paths)?;
+        log::info(&format!("installed {}-{}", pkg.name, pkg.version));
     }
 
     Ok(())
@@ -70,58 +87,116 @@ pub fn install_package(job: &InstallJob, db: &InstalledDb) -> Result<()> {
 // ─────────────────────────────────────────────────────────────
 
 pub fn remove_package(installed: &InstalledPackage, db: &InstalledDb, purge: bool) -> Result<()> {
+    log::pkg("remove", &installed.name, &installed.version);
+
     let files = db.files_of(&installed.name);
 
-    // Also remove any /etc/alternatives entries we may have created
+    // prerm (best-effort, no deb cached — skip for now)
+
+    // Remove /etc/alternatives pointing to our files
     remove_alternatives_for(&files);
 
-    // Delete regular files and symlinks
+    // Delete files
     for f in &files {
         let path = Path::new(f);
+        if path.is_dir() { continue; }
+        if path.symlink_metadata().is_err() { continue; }
 
-        if path.is_dir() {
-            continue; // never remove directories here
-        }
-        // exists() follows symlinks; symlink_metadata() doesn't
-        if !path.symlink_metadata().is_ok() {
-            continue; // doesn't exist at all
-        }
-
-        if let Err(e) = std::fs::remove_file(path) {
-            eprintln!("    {} removing {:?}: {}", "warn".yellow().dimmed(), path, e);
+        match std::fs::remove_file(path) {
+            Ok(_)  => log::file_op("delete", f),
+            Err(e) => {
+                let msg = format!("removing {:?}: {}", path, e);
+                log::warn(&msg);
+                eprintln!("    {} {}", "warn".yellow().dimmed(), msg);
+            }
         }
     }
 
-    // Clean up now-empty package-specific dirs (deepest first)
-    let dirs: std::collections::BTreeSet<PathBuf> = files
+    // Clean empty dirs (deepest first)
+    let mut dirs: Vec<PathBuf> = files
     .iter()
     .filter_map(|f| Path::new(f).parent().map(|p| p.to_owned()))
+    .collect::<std::collections::BTreeSet<_>>()
+    .into_iter()
     .collect();
+    dirs.sort_by(|a, b| b.cmp(a));
 
-    let mut dir_vec: Vec<PathBuf> = dirs.into_iter().collect();
-    dir_vec.sort_by(|a, b| b.cmp(a));
-
-    for dir in dir_vec {
+    for dir in dirs {
         if is_safe_to_rmdir(&dir) {
-            let _ = std::fs::remove_dir(&dir);
+            if std::fs::remove_dir(&dir).is_ok() {
+                log::file_op("rmdir", &dir.to_string_lossy());
+            }
         }
     }
 
-    if purge {
-        purge_config_files(&installed.name);
-    }
+    if purge { purge_config_files(&installed.name); }
 
     db.record_remove(&installed.name, &installed.version)?;
+    log::info(&format!("removed {}-{}", installed.name, installed.version));
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Maintainer script execution
+// ─────────────────────────────────────────────────────────────
+
+/// Extract `script_name` from the .deb control.tar, write to a temp file,
+/// and execute it with `args`. Returns true if the script was found and ran
+/// (even if it exited non-zero), false if the script doesn't exist in the .deb.
+fn run_maintainer_script(deb: &DebPackage, script_name: &str, args: &[&str]) -> bool {
+    let content = match deb.extract_script(script_name) {
+        Some(s) => s,
+        None    => return false,
+    };
+
+    let tmp_path = format!("/tmp/lpm-{}-{}", deb.control.name, script_name);
+
+    // Write script to temp file
+    let write_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(content.as_bytes())?;
+        // chmod +x
+        let mut perms = f.metadata()?.permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms)?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        log::warn(&format!("could not write {}: {}", script_name, e));
+        return false;
+    }
+
+    log::info(&format!("running {} for {}", script_name, deb.control.name));
+
+    let status = std::process::Command::new(&tmp_path)
+    .args(args)
+    .env("DEBIAN_FRONTEND", "noninteractive")
+    .env("DEBCONF_NONINTERACTIVE_SEEN", "true")
+    .status();
+
+    let _ = std::fs::remove_file(&tmp_path);
+
+    match status {
+        Ok(s) => {
+            if !s.success() {
+                log::warn(&format!(
+                    "{} for {} exited with {:?}",
+                    script_name, deb.control.name, s.code()
+                ));
+            }
+            true
+        }
+        Err(e) => {
+            log::warn(&format!("failed to run {}: {}", script_name, e));
+            false
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────
-
-fn run_maintainer_script(_deb: &DebPackage, _script: &str, _args: &[&str]) {
-    // TODO v2: extract and execute preinst/postinst/prerm/postrm
-}
 
 fn fix_permissions(paths: &[PathBuf]) {
     for path in paths {
@@ -135,15 +210,13 @@ fn fix_permissions(paths: &[PathBuf]) {
             if let Ok(meta) = std::fs::metadata(path) {
                 let mut perms = meta.permissions();
                 let mode      = perms.mode();
-                let exec_bits = (mode & 0o444) >> 2;
-                perms.set_mode(mode | exec_bits);
+                perms.set_mode(mode | ((mode & 0o444) >> 2));
                 let _ = std::fs::set_permissions(path, perms);
             }
         }
     }
 }
 
-/// Remove /etc/alternatives/* entries that point to files we're about to remove.
 fn remove_alternatives_for(files: &[String]) {
     let alt_dir = Path::new("/etc/alternatives");
     if !alt_dir.exists() { return; }
@@ -154,11 +227,11 @@ fn remove_alternatives_for(files: &[String]) {
     if let Ok(entries) = std::fs::read_dir(alt_dir) {
         for entry in entries.flatten() {
             let alt_path = entry.path();
-            // Read where this alternative points
             if let Ok(target) = std::fs::read_link(&alt_path) {
-                let target_str = target.to_string_lossy().to_string();
-                if file_set.contains(target_str.as_str()) {
-                    let _ = std::fs::remove_file(&alt_path);
+                if file_set.contains(target.to_string_lossy().as_ref()) {
+                    if std::fs::remove_file(&alt_path).is_ok() {
+                        log::file_op("rm-alt", &alt_path.to_string_lossy());
+                    }
                 }
             }
         }
@@ -166,15 +239,12 @@ fn remove_alternatives_for(files: &[String]) {
 }
 
 const PROTECTED: &[&str] = &[
-    "/",
-"/usr", "/usr/bin", "/usr/lib", "/usr/lib64", "/usr/libexec",
+    "/", "/usr", "/usr/bin", "/usr/lib", "/usr/lib64", "/usr/libexec",
 "/usr/share", "/usr/include", "/usr/local",
-"/usr/share/doc", "/usr/share/man", "/usr/share/info",
-"/usr/share/locale",
+"/usr/share/doc", "/usr/share/man", "/usr/share/info", "/usr/share/locale",
 "/bin", "/sbin", "/lib", "/lib64",
 "/etc", "/var", "/var/lib", "/var/cache", "/var/log",
-"/tmp", "/opt", "/home", "/root",
-"/sys", "/proc", "/dev", "/run",
+"/tmp", "/opt", "/home", "/root", "/sys", "/proc", "/dev", "/run",
 ];
 
 fn is_safe_to_rmdir(path: &Path) -> bool {
@@ -184,8 +254,10 @@ fn is_safe_to_rmdir(path: &Path) -> bool {
 }
 
 fn purge_config_files(pkg_name: &str) {
-    let etc_path = PathBuf::from("/etc").join(pkg_name);
-    if etc_path.exists() && etc_path.is_dir() {
-        let _ = std::fs::remove_dir_all(&etc_path);
+    let p = PathBuf::from("/etc").join(pkg_name);
+    if p.exists() && p.is_dir() {
+        if std::fs::remove_dir_all(&p).is_ok() {
+            log::file_op("purge", &p.to_string_lossy());
+        }
     }
 }
