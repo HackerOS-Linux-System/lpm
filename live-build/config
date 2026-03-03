@@ -1,0 +1,27 @@
+#!/bin/bash
+# auto/config — uruchamiaj przez: lb config
+set -e
+
+lb config noauto \
+    --mode debian \
+    --system live \
+    --distribution testing \
+    --archive-areas "main contrib non-free non-free-firmware" \
+    --mirror-bootstrap "http://deb.debian.org/debian/" \
+    --mirror-chroot "http://deb.debian.org/debian/" \
+    --mirror-binary "http://deb.debian.org/debian/" \
+    --architectures amd64 \
+    --binary-images iso-hybrid \
+    --bootloader grub-efi \
+    --debian-installer none \
+    --memtest none \
+    --iso-application "MyDistro" \
+    --iso-publisher "MyDistro Project" \
+    --iso-volume "MYDISTRO_$(date +%Y%m%d)" \
+    --linux-packages "linux-image linux-headers" \
+    --linux-flavours "amd64" \
+    --firmware-binary true \
+    --firmware-chroot true \
+    --apt-recommends false \
+    --checksums sha256 \
+    "${@}"
