@@ -17,7 +17,7 @@ use crate::ui;
 // ─────────────────────────────────────────────────────────────
 
 pub enum Command {
-    Install      { packages: Vec<String>, assume_yes: bool, no_recommends: bool },
+    Install      { packages: Vec<String>, assume_yes: bool, with_recommends: bool },
     Remove       { packages: Vec<String>, assume_yes: bool, purge: bool },
     Update,
     Upgrade      { assume_yes: bool },
@@ -50,17 +50,18 @@ pub fn parse_args() -> Result<Command> {
         "install" | "i" | "in" => {
             let mut pkgs  = Vec::new();
             let mut yes   = false;
-            let mut norec = false;
+            let mut with_rec = false; // Recommends OFF by default
             while let Some(arg) = parser.next()? {
                 match arg {
                     Short('y') | Long("yes") | Long("assumeyes") => yes = true,
-                    Long("no-install-recommends") => norec = true,
+                    Long("with-recommends") | Long("install-recommends") => with_rec = true,
+                    Long("no-install-recommends") => with_rec = false,
                     Value(v) => pkgs.push(v.to_string_lossy().to_string()),
                     _ => bail!("Unknown flag: {}", arg.unexpected()),
                 }
             }
             if pkgs.is_empty() { bail!("No packages specified. Usage: lpm install <pkg...>"); }
-            Ok(Command::Install { packages: pkgs, assume_yes: yes, no_recommends: norec })
+            Ok(Command::Install { packages: pkgs, assume_yes: yes, with_recommends: with_rec })
         }
 
         "remove" | "rm" | "erase" => {
@@ -173,7 +174,7 @@ pub async fn cmd_update() -> Result<()> {
 //  install
 // ─────────────────────────────────────────────────────────────
 
-pub async fn cmd_install(names: &[String], assume_yes: bool, no_recommends: bool) -> Result<()> {
+pub async fn cmd_install(names: &[String], assume_yes: bool, with_recommends: bool) -> Result<()> {
     log::transaction_start("install", names);
     ui::last_metadata_check();
 
@@ -182,7 +183,7 @@ pub async fn cmd_install(names: &[String], assume_yes: bool, no_recommends: bool
     let solver = Solver::new(&cache, &db);
     let arch   = detect_arch();
 
-    let plan = solver.resolve_install(names, no_recommends)?;
+    let plan = solver.resolve_install(names, !with_recommends)?;
 
     if plan.is_empty() {
         ui::deps_resolved();
@@ -478,15 +479,15 @@ pub async fn cmd_info(package: &str) -> Result<()> {
             section:           inst.section,
             maintainer:        inst.maintainer,
             installed_size_kb: Some(inst.installed_size_kb),
-            depends:           inst.depends,
-            recommends:        inst.recommends,
-            ..Default::default()
+                                                                       depends:           inst.depends,
+                                                                       recommends:        inst.recommends,
+                                                                       ..Default::default()
         }
     });
 
     let pkg: Option<&crate::package::Package> = cache
-        .get(package)
-        .or_else(|| from_db.as_ref());
+    .get(package)
+    .or_else(|| from_db.as_ref());
 
     match pkg {
         None => bail!("No package named '{}' found.\n  Hint: try `lpm search {}`", package, package),
@@ -509,21 +510,21 @@ pub async fn cmd_list(installed: bool, upgradeable: bool, _available: bool) -> R
 
     if upgradeable {
         let upgrades: Vec<_> = db.list_all()?
-            .into_iter()
-            .filter_map(|p| {
-                let avail = cache.get(&p.name)?;
-                if crate::package::version_cmp(&avail.version, &p.version) == std::cmp::Ordering::Greater {
-                    Some((p, avail.clone()))
-                } else { None }
-            })
-            .collect();
+        .into_iter()
+        .filter_map(|p| {
+            let avail = cache.get(&p.name)?;
+            if crate::package::version_cmp(&avail.version, &p.version) == std::cmp::Ordering::Greater {
+                Some((p, avail.clone()))
+            } else { None }
+        })
+        .collect();
 
         if upgrades.is_empty() {
             println!("{}", "No packages marked for upgrade.".bold());
         } else {
             for (inst, avail) in &upgrades {
                 let repo = avail.repo_base_uri.as_deref()
-                    .unwrap_or("").trim_end_matches('/').split('/').last().unwrap_or("unknown");
+                .unwrap_or("").trim_end_matches('/').split('/').last().unwrap_or("unknown");
                 ui::print_list_entry(
                     &inst.name, &inst.version, &inst.architecture,
                     true, repo, Some(&avail.version),
@@ -546,7 +547,7 @@ pub async fn cmd_list(installed: bool, upgradeable: bool, _available: bool) -> R
         for p in cache.all_packages() {
             let is_inst = db.is_installed(&p.name);
             let repo = p.repo_base_uri.as_deref()
-                .unwrap_or("").trim_end_matches('/').split('/').last().unwrap_or("unknown");
+            .unwrap_or("").trim_end_matches('/').split('/').last().unwrap_or("unknown");
             ui::print_list_entry(
                 &p.name, &p.version, &p.architecture,
                 is_inst, repo, None,
@@ -583,7 +584,7 @@ pub async fn cmd_clean() -> Result<()> {
     println!(
         "{} files removed, {} freed.",
         count.to_string().bold(),
-        ui::human_size(freed).yellow().bold()
+             ui::human_size(freed).yellow().bold()
     );
     Ok(())
 }
@@ -611,7 +612,7 @@ pub fn print_version() {
     println!(
         "{} {} — Legendary Package Manager",
         "lpm".bold().bright_magenta(),
-        env!("CARGO_PKG_VERSION").bold()
+             env!("CARGO_PKG_VERSION").bold()
     );
     println!("Standalone Debian-compatible. No apt/dpkg required.");
     println!("Log file: {}", crate::log::LOG_FILE.cyan());
@@ -657,7 +658,7 @@ pub fn print_help() {
     for (o, d) in &[
         ("-y, --yes",               "Assume yes"),
         ("--purge",                 "Remove config files too"),
-        ("--no-install-recommends", "Skip recommended packages"),
+        ("--with-recommends", "Install recommended packages (off by default)"),
         ("--installed",             "Filter to installed (list/search)"),
         ("--upgrades",              "Show upgradeable only (list)"),
     ] {
