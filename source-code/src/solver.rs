@@ -47,32 +47,35 @@ impl<'a> Solver<'a> {
 
     // ──────────────────────────────────────────────────────────
     //  resolve_install
+    //
+    //  Recommends are OFF by default (no_recommends = true by default
+    //  in cli.rs). User must pass --with-recommends to enable them.
+    //  This matches DNF/zypper behaviour and avoids surprise bloat.
     // ──────────────────────────────────────────────────────────
 
     pub fn resolve_install(
         &self,
-        names:         &[String],
-        no_recommends: bool,
+        names:          &[String],
+        no_recommends:  bool,
     ) -> Result<TransactionPlan> {
         let mut plan  = TransactionPlan::default();
         let mut seen: HashSet<String> = HashSet::new();
-        // (package_name, explicitly_requested_by_user)
         let mut queue: VecDeque<(String, bool)> = VecDeque::new();
 
         for name in names {
-            if self.cache.get(name).is_none() {
+            // Strip arch qualifier if present (e.g. "vim:amd64" → "vim")
+            let name = name.split(':').next().unwrap_or(name).to_owned();
+            if self.cache.get(&name).is_none() {
                 bail!(
                     "No match for package: '{}'\n  Hint: run `lpm update` to refresh the package index.",
                     name
                 );
             }
-            queue.push_back((name.clone(), true));
+            queue.push_back((name, true));
         }
 
         while let Some((name, explicit)) = queue.pop_front() {
-            if seen.contains(&name) {
-                continue;
-            }
+            if seen.contains(&name) { continue; }
             seen.insert(name.clone());
 
             let avail = match self.cache.get(&name) {
@@ -85,11 +88,21 @@ impl<'a> Solver<'a> {
                 }
             };
 
+            // Skip packages marked as Priority: required/important/standard
+            // unless explicitly requested — they're already on the system
+            let priority = avail.priority.as_deref().unwrap_or("");
+            if !explicit && matches!(priority, "required" | "important" | "standard") {
+                // Still enqueue their deps if they're not installed
+                if !self.db.is_installed(&name) {
+                    self.enqueue_deps(&avail, true, &mut queue); // always no-recommends for system pkgs
+                }
+                continue;
+            }
+
             if let Some(inst) = self.db.get(&name) {
                 if explicit {
                     match version_cmp(&avail.version, &inst.version) {
                         std::cmp::Ordering::Greater => {
-                            // Newer version available → upgrade
                             plan.upgrade_from.insert(name.clone(), inst.version.clone());
                             plan.download_bytes += avail.download_size.unwrap_or(0);
                             plan.install_bytes  += avail.installed_size_kb.unwrap_or(0) * 1024;
@@ -97,26 +110,21 @@ impl<'a> Solver<'a> {
                             plan.to_upgrade.push(avail);
                         }
                         _ => {
-                            // Same or older version in cache.
-                            // Check if the package binary actually exists on disk.
-                            // If the user ran `remove` and then `install` again,
-                            // DB might still list it but files are gone.
                             if !package_physically_present(&inst) {
-                                // Reinstall: treat like a fresh install
                                 plan.download_bytes += avail.download_size.unwrap_or(0);
                                 plan.install_bytes  += avail.installed_size_kb.unwrap_or(0) * 1024;
                                 self.enqueue_deps(&avail, no_recommends, &mut queue);
                                 plan.to_install.push(avail);
                             }
-                            // else: truly already installed and up to date → skip
+                            // else: up to date, skip
                         }
                     }
                 }
-                // Either handled above or it's a dep that's already installed → skip
+                // dep already installed → satisfied
                 continue;
             }
 
-            // Not in DB at all → fresh install
+            // Not in DB → install
             plan.download_bytes += avail.download_size.unwrap_or(0);
             plan.install_bytes  += avail.installed_size_kb.unwrap_or(0) * 1024;
             self.enqueue_deps(&avail, no_recommends, &mut queue);
@@ -134,6 +142,9 @@ impl<'a> Solver<'a> {
         no_recommends: bool,
         queue:         &mut VecDeque<(String, bool)>,
     ) {
+        // Always follow: Pre-Depends, Depends
+        // Only follow Recommends if --with-recommends is passed
+        // Never follow: Suggests
         let fields: &[Option<&str>] = &[
             pkg.pre_depends.as_deref(),
             pkg.depends.as_deref(),
@@ -142,6 +153,7 @@ impl<'a> Solver<'a> {
 
         for field in fields.iter().flatten() {
             for group in parse_dep_field(field) {
+                // Prefer an already-installed alternative
                 let chosen = group.alternatives.iter().find(|alt| {
                     if let Some(inst) = self.db.get(&alt.name) {
                         if let Some(ref c) = alt.constraint {
@@ -149,10 +161,19 @@ impl<'a> Solver<'a> {
                         }
                         return true;
                     }
-                    self.cache.get(&alt.name).is_some()
+                    false
+                })
+                // Otherwise prefer first alternative available in cache
+                .or_else(|| {
+                    group.alternatives.iter().find(|alt| {
+                        self.cache.get(&alt.name).is_some()
+                    })
                 });
+
                 if let Some(dep) = chosen {
-                    queue.push_back((dep.name.clone(), false));
+                    // Strip arch qualifier
+                    let dep_name = dep.name.split(':').next().unwrap_or(&dep.name).to_owned();
+                    queue.push_back((dep_name, false));
                 }
             }
         }
@@ -177,7 +198,7 @@ impl<'a> Solver<'a> {
     }
 
     // ──────────────────────────────────────────────────────────
-    //  resolve_upgrade  (all installed)
+    //  resolve_upgrade
     // ──────────────────────────────────────────────────────────
 
     pub fn resolve_upgrade(&self) -> Result<TransactionPlan> {
@@ -209,12 +230,9 @@ impl<'a> Solver<'a> {
         let mut queue: VecDeque<String> = needed.iter().cloned().collect();
         while let Some(name) = queue.pop_front() {
             if let Some(pkg) = self.db.get(&name) {
-                // InstalledPackage only has `depends`, not `pre_depends`
                 if let Some(ref dep_str) = pkg.depends {
                     for group in parse_dep_field(dep_str) {
-                        if let Some(dep) = group
-                            .alternatives
-                            .iter()
+                        if let Some(dep) = group.alternatives.iter()
                             .find(|a| self.db.is_installed(&a.name))
                             {
                                 if needed.insert(dep.name.clone()) {
@@ -240,20 +258,11 @@ impl<'a> Solver<'a> {
 
 // ─────────────────────────────────────────────────────────────
 //  Physical presence check
-//
-//  Heuristic: take the first file in the tracked file list and
-//  check if it exists on disk. If the list is empty (old DB entry)
-//  we assume the package is present to avoid spurious reinstalls.
 // ─────────────────────────────────────────────────────────────
 
 fn package_physically_present(inst: &crate::db::InstalledPackage) -> bool {
-    let first_file = inst.files
-    .split(';')
-    .find(|s| !s.is_empty());
-
-    match first_file {
-        // No file list recorded (edge case) → assume present
-        None => true,
+    match inst.files.split(';').find(|s| !s.is_empty()) {
+        None    => true, // no file list → assume present
         Some(f) => std::path::Path::new(f).exists(),
     }
 }
