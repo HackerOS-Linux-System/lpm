@@ -5,6 +5,7 @@ mod cli;
 mod db;
 mod deb;
 mod download;
+mod dpkg_status;
 mod fs_install;
 mod log;
 mod package;
@@ -35,11 +36,11 @@ async fn run() -> Result<()> {
     let needs_root = matches!(
         &cmd,
         Command::Install { .. }
-            | Command::Remove { .. }
-            | Command::Upgrade { .. }
-            | Command::Update
-            | Command::Clean
-            | Command::Autoremove { .. }
+        | Command::Remove { .. }
+        | Command::Upgrade { .. }
+        | Command::Update
+        | Command::Clean
+        | Command::Autoremove { .. }
     );
 
     if needs_root && !is_root() {
@@ -50,26 +51,26 @@ async fn run() -> Result<()> {
     }
 
     match cmd {
-        Command::Install { packages, assume_yes, no_recommends } =>
-            cli::cmd_install(&packages, assume_yes, no_recommends).await,
+        Command::Install { packages, assume_yes, with_recommends } =>
+        cli::cmd_install(&packages, assume_yes, with_recommends).await,
         Command::Remove { packages, assume_yes, purge } =>
-            cli::cmd_remove(&packages, assume_yes, purge).await,
+        cli::cmd_remove(&packages, assume_yes, purge).await,
         Command::Update =>
-            cli::cmd_update().await,
+        cli::cmd_update().await,
         Command::Upgrade { assume_yes } =>
-            cli::cmd_upgrade(assume_yes).await,
+        cli::cmd_upgrade(assume_yes).await,
         Command::Autoremove { assume_yes } =>
-            cli::cmd_autoremove(assume_yes).await,
+        cli::cmd_autoremove(assume_yes).await,
         Command::Search { query, installed } =>
-            cli::cmd_search(&query, installed).await,
+        cli::cmd_search(&query, installed).await,
         Command::Info { package } =>
-            cli::cmd_info(&package).await,
+        cli::cmd_info(&package).await,
         Command::List { installed, upgradeable, available } =>
-            cli::cmd_list(installed, upgradeable, available).await,
+        cli::cmd_list(installed, upgradeable, available).await,
         Command::Clean =>
-            cli::cmd_clean().await,
+        cli::cmd_clean().await,
         Command::History =>
-            cli::cmd_history().await,
+        cli::cmd_history().await,
         Command::Version => { cli::print_version(); Ok(()) }
         Command::Help    => { cli::print_help();    Ok(()) }
     }
