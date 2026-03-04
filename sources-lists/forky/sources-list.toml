@@ -1,1 +1,79 @@
+# /etc/lpm/sources-list.toml
+# Konfiguracja repozytoriów lpm dla Debian 14 "Forky"
+# Wygenerowano dla architektury amd64
+#
+# Aby zmienić architekturę zmień pole arch = ["amd64"]
+# Dostępne: amd64, arm64, armhf, i386, riscv64, s390x, ppc64el
 
+# ─────────────────────────────────────────────────────────────
+#  GŁÓWNE REPOZYTORIUM
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-forky-main"
+baseurl    = "https://deb.debian.org/debian"
+suite      = "forky"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = true
+# gpgkey   = "/etc/apt/keyrings/debian-archive-keyring.gpg"
+
+# ─────────────────────────────────────────────────────────────
+#  AKTUALIZACJE
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-forky-updates"
+baseurl    = "https://deb.debian.org/debian"
+suite      = "forky-updates"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = true
+
+# ─────────────────────────────────────────────────────────────
+#  BACKPORTS
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-forky-backports"
+baseurl    = "https://deb.debian.org/debian"
+suite      = "forky-backports"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = true
+
+# ─────────────────────────────────────────────────────────────
+#  SECURITY
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-forky-security"
+baseurl    = "https://security.debian.org/debian-security"
+suite      = "forky-security"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = true
+
+# ─────────────────────────────────────────────────────────────
+#  PROPOSED-UPDATES (opcjonalne – pakiety przed wejściem do stable)
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-forky-proposed-updates"
+baseurl    = "https://deb.debian.org/debian"
+suite      = "forky-proposed-updates"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = false   # domyślnie wyłączone – włącz jeśli chcesz testować
+
+# ─────────────────────────────────────────────────────────────
+#  DEBUG SYMBOLS (opcjonalne – dla deweloperów)
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-forky-debug"
+baseurl    = "https://debug.mirrors.debian.org/debian-debug"
+suite      = "forky-debug"
+components = ["main", "contrib", "non-free"]
+arch       = ["amd64"]
+enabled    = false   # włącz tylko jeśli potrzebujesz symboli debugowania
