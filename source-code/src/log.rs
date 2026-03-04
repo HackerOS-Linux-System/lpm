@@ -1,11 +1,3 @@
-//! Simple append-only logger to /tmp/lpm.log
-//!
-//! Usage:
-//!   log::info("Installing vim");
-//!   log::warn("dependency foo not found");
-//!   log::error("failed to open DB");
-//!   log::cmd("install", &["vim", "nano"]);
-
 use std::fs::OpenOptions;
 use std::io::Write;
 
