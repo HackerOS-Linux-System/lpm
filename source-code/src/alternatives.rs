@@ -1,18 +1,3 @@
-//! Minimal update-alternatives implementation.
-//!
-//! When a .deb is installed, its postinst script typically calls:
-//!   update-alternatives --install /usr/bin/vim vim /usr/bin/vim.basic 30
-//!
-//! This creates:
-//!   /etc/alternatives/vim -> /usr/bin/vim.basic   (managed symlink)
-//!   /usr/bin/vim          -> /etc/alternatives/vim (generic name)
-//!
-//! We implement this by:
-//!   1. After extracting a package, scanning for broken symlinks
-//!   2. For each broken symlink pointing to /etc/alternatives/X,
-//!      finding a real binary that could serve as the alternative
-//!      and creating /etc/alternatives/X -> actual_binary
-
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
@@ -91,11 +76,11 @@ pub fn fix_alternatives(installed_files: &[PathBuf]) {
             // anywhere in the extracted files list, use that
             let fallback = installed_files.iter().find(|f| {
                 f.file_name().and_then(|n| n.to_str())
-                    .map_or(false, |n| {
-                        n == format!("{}.basic", alt_name)
-                            || n == format!("{}.tiny", alt_name)
-                            || (n != alt_name && n.starts_with(&alt_name))
-                    })
+                .map_or(false, |n| {
+                    n == format!("{}.basic", alt_name)
+                    || n == format!("{}.tiny", alt_name)
+                    || (n != alt_name && n.starts_with(&alt_name))
+                })
             });
 
             if let Some(real_bin) = fallback {
@@ -113,7 +98,7 @@ pub fn fix_alternatives(installed_files: &[PathBuf]) {
 /// Called after installing packages that provide .so files.
 pub fn run_ldconfig() {
     let _ = std::process::Command::new("ldconfig")
-        .status();
+    .status();
 }
 
 /// Check if any installed file is a shared library that needs ldconfig.
@@ -121,6 +106,6 @@ pub fn needs_ldconfig(files: &[PathBuf]) -> bool {
     files.iter().any(|f| {
         let s = f.to_string_lossy();
         (s.contains("/lib/") || s.contains("/lib64/"))
-            && (s.contains(".so") )
+        && (s.contains(".so") )
     })
 }
