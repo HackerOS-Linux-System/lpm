@@ -1,3 +1,5 @@
+//! DNF-identical terminal UI for lpm.
+
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use std::io::{self, Write};
