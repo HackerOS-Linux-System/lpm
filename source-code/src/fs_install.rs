@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::alternatives::{fix_alternatives, needs_ldconfig, run_ldconfig};
 use crate::db::{InstalledDb, InstalledPackage, InstallReason};
 use crate::deb::DebPackage;
+use crate::dpkg_status;
 use crate::log;
 use crate::package::Package;
 
@@ -46,13 +47,41 @@ pub fn install_package(job: &InstallJob, db: &InstalledDb) -> Result<()> {
 
     log::info(&format!("extracted {} files for {}", written.len(), pkg.name));
 
+    // ── Record in lpm DB first (before postinst) ─────────────
+    // This way if postinst calls dpkg-query it finds our package
+    let file_paths: Vec<String> = written
+    .iter()
+    .map(|p| p.to_string_lossy().to_string())
+    .collect();
+
+    if job.is_upgrade {
+        db.record_upgrade(old_ver, pkg, &file_paths)?;
+    } else {
+        db.record_install(pkg, job.reason, &file_paths)?;
+    }
+
+    // ── Sync to /var/lib/dpkg/status ─────────────────────────
+    // This makes dpkg-query, py3compile, dpkg-maintscript-helper
+    // aware of the package BEFORE postinst runs.
+    dpkg_status::record_in_dpkg(
+        &pkg.name,
+        &pkg.version,
+        &pkg.architecture,
+        pkg.installed_size_kb.unwrap_or(0),
+                                pkg.depends.as_deref(),
+                                pkg.recommends.as_deref(),
+                                pkg.section.as_deref(),
+                                pkg.maintainer.as_deref(),
+                                pkg.description_short.as_deref(),
+                                &file_paths,
+    );
+
     // ── postinst ──────────────────────────────────────────────
-    // Run BEFORE fix_alternatives so update-alternatives in postinst
-    // creates /etc/alternatives/* properly.
+    // Run AFTER dpkg/status is updated so dpkg-query works inside postinst.
     let postinst_ran = run_maintainer_script(&job.deb, "postinst", &["configure", old_ver]);
 
     // ── fix_alternatives fallback ─────────────────────────────
-    // If postinst didn't run (or failed), fix any broken alternatives ourselves.
+    // If postinst didn't run or didn't call update-alternatives, fix manually.
     if !postinst_ran {
         fix_alternatives(&all_paths);
     }
@@ -65,17 +94,9 @@ pub fn install_package(job: &InstallJob, db: &InstalledDb) -> Result<()> {
         run_ldconfig();
     }
 
-    // ── Record in DB ─────────────────────────────────────────
-    let file_paths: Vec<String> = written
-    .iter()
-    .map(|p| p.to_string_lossy().to_string())
-    .collect();
-
     if job.is_upgrade {
-        db.record_upgrade(old_ver, pkg, &file_paths)?;
         log::info(&format!("upgraded {} {} -> {}", pkg.name, old_ver, pkg.version));
     } else {
-        db.record_install(pkg, job.reason, &file_paths)?;
         log::info(&format!("installed {}-{}", pkg.name, pkg.version));
     }
 
@@ -90,8 +111,6 @@ pub fn remove_package(installed: &InstalledPackage, db: &InstalledDb, purge: boo
     log::pkg("remove", &installed.name, &installed.version);
 
     let files = db.files_of(&installed.name);
-
-    // prerm (best-effort, no deb cached — skip for now)
 
     // Remove /etc/alternatives pointing to our files
     remove_alternatives_for(&files);
@@ -131,7 +150,12 @@ pub fn remove_package(installed: &InstalledPackage, db: &InstalledDb, purge: boo
 
     if purge { purge_config_files(&installed.name); }
 
+    // Remove from lpm DB
     db.record_remove(&installed.name, &installed.version)?;
+
+    // Remove from /var/lib/dpkg/status
+    dpkg_status::remove_from_dpkg(&installed.name);
+
     log::info(&format!("removed {}-{}", installed.name, installed.version));
     Ok(())
 }
@@ -140,9 +164,6 @@ pub fn remove_package(installed: &InstalledPackage, db: &InstalledDb, purge: boo
 //  Maintainer script execution
 // ─────────────────────────────────────────────────────────────
 
-/// Extract `script_name` from the .deb control.tar, write to a temp file,
-/// and execute it with `args`. Returns true if the script was found and ran
-/// (even if it exited non-zero), false if the script doesn't exist in the .deb.
 fn run_maintainer_script(deb: &DebPackage, script_name: &str, args: &[&str]) -> bool {
     let content = match deb.extract_script(script_name) {
         Some(s) => s,
@@ -151,11 +172,9 @@ fn run_maintainer_script(deb: &DebPackage, script_name: &str, args: &[&str]) -> 
 
     let tmp_path = format!("/tmp/lpm-{}-{}", deb.control.name, script_name);
 
-    // Write script to temp file
     let write_result = (|| -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp_path)?;
         f.write_all(content.as_bytes())?;
-        // chmod +x
         let mut perms = f.metadata()?.permissions();
         perms.set_mode(0o755);
         f.set_permissions(perms)?;
@@ -171,8 +190,15 @@ fn run_maintainer_script(deb: &DebPackage, script_name: &str, args: &[&str]) -> 
 
     let status = std::process::Command::new(&tmp_path)
     .args(args)
-    .env("DEBIAN_FRONTEND", "noninteractive")
-    .env("DEBCONF_NONINTERACTIVE_SEEN", "true")
+    // Required env vars for dpkg-maintscript-helper and friends
+    .env("DPKG_MAINTSCRIPT_PACKAGE",   &deb.control.name)
+    .env("DPKG_MAINTSCRIPT_ARCH",      &deb.control.architecture)
+    .env("DPKG_MAINTSCRIPT_NAME",      script_name)
+    .env("DPKG_RUNNING_VERSION",       "1.23.5")
+    .env("DEBIAN_FRONTEND",            "noninteractive")
+    .env("DEBCONF_NONINTERACTIVE_SEEN","true")
+    // Prevent systemd unit activation during install
+    .env("DPKG_NO_TSTP",              "1")
     .status();
 
     let _ = std::fs::remove_file(&tmp_path);
@@ -181,8 +207,7 @@ fn run_maintainer_script(deb: &DebPackage, script_name: &str, args: &[&str]) -> 
         Ok(s) => {
             if !s.success() {
                 log::warn(&format!(
-                    "{} for {} exited with {:?}",
-                    script_name, deb.control.name, s.code()
+                    "{} for {} exited {:?}", script_name, deb.control.name, s.code()
                 ));
             }
             true
