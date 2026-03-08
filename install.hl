@@ -1,3 +1,4 @@
 // curl
 
-> sudo curl -L https://github.com/HackerOS-Linux-System/lpm/releases/download/v0.4/lpm -o /usr/bin/lpm && sudo chmod +x /usr/bin/lpm
+> sudo curl -L https://github.com/HackerOS-Linux-System/lpm/releases/download/v0.5/lpm -o /usr/bin/lpm && sudo chmod +x /usr/bin/lpm
+> lpm init && lpm update
