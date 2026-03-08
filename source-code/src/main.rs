@@ -41,6 +41,7 @@ async fn run() -> Result<()> {
         | Command::Update
         | Command::Clean
         | Command::Autoremove { .. }
+        | Command::Init
     );
 
     if needs_root && !is_root() {
@@ -71,6 +72,7 @@ async fn run() -> Result<()> {
         cli::cmd_clean().await,
         Command::History =>
         cli::cmd_history().await,
+        Command::Init => { cli::cmd_init()?; Ok(()) }
         Command::Version => { cli::print_version(); Ok(()) }
         Command::Help    => { cli::print_help();    Ok(()) }
     }
