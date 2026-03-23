@@ -1,1 +1,31 @@
+# /etc/lpm/sources-list.toml
+# Konfiguracja repozytoriów lpm dla Debian "Sid" (Unstable)
+# Wygenerowano dla architektury amd64
+#
+# Pamiętaj: Sid jest gałęzią ciągłą (rolling release).
 
+# ─────────────────────────────────────────────────────────────
+#  GŁÓWNE REPOZYTORIUM (SID / UNSTABLE)
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-sid-main"
+baseurl    = "https://deb.debian.org/debian"
+suite      = "sid"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = true
+# gpgkey   = "/etc/apt/keyrings/debian-archive-keyring.gpg"
+
+# ─────────────────────────────────────────────────────────────
+#  DEBUG SYMBOLS (opcjonalne – dla deweloperów)
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-sid-debug"
+baseurl    = "https://debug.mirrors.debian.org/debian-debug"
+suite      = "sid-debug"
+components = ["main", "contrib", "non-free"]
+arch       = ["amd64"]
+enabled    = false   # włącz tylko jeśli potrzebujesz symboli debugow
+ania
