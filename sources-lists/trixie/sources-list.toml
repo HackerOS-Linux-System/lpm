@@ -1,1 +1,80 @@
+# /etc/lpm/sources-list.toml
+# Konfiguracja repozytoriów lpm dla Debian 13 "Trixie"
+# Wygenerowano dla architektury amd64
+#
+# Aby zmienić architekturę zmień pole arch = ["amd64"]
+# Dostępne: amd64, arm64, armhf, i386, riscv64, s390x, ppc64el
 
+# ─────────────────────────────────────────────────────────────
+#  GŁÓWNE REPOZYTORIUM
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-trixie-main"
+baseurl    = "https://deb.debian.org/debian"
+suite      = "trixie"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = true
+# gpgkey   = "/etc/apt/keyrings/debian-archive-keyring.gpg"
+
+# ─────────────────────────────────────────────────────────────
+#  AKTUALIZACJE
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-trixie-updates"
+baseurl    = "https://deb.debian.org/debian"
+suite      = "trixie-updates"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = true
+
+# ─────────────────────────────────────────────────────────────
+#  BACKPORTS
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-trixie-backports"
+baseurl    = "https://deb.debian.org/debian"
+suite      = "trixie-backports"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = true
+
+# ─────────────────────────────────────────────────────────────
+#  SECURITY
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-trixie-security"
+baseurl    = "https://security.debian.org/debian-security"
+suite      = "trixie-security"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = true
+
+# ─────────────────────────────────────────────────────────────
+#  PROPOSED-UPDATES (opcjonalne – pakiety przed wejściem do stable)
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-trixie-proposed-updates"
+baseurl    = "https://deb.debian.org/debian"
+suite      = "trixie-proposed-updates"
+components = ["main", "contrib", "non-free", "non-free-firmware"]
+arch       = ["amd64"]
+enabled    = false   # domyślnie wyłączone – włącz jeśli chcesz testować
+
+# ─────────────────────────────────────────────────────────────
+#  DEBUG SYMBOLS (opcjonalne – dla deweloperów)
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "debian-trixie-debug"
+baseurl    = "https://debug.mirrors.debian.org/debian-debug"
+suite      = "trixie-debug"
+components = ["main", "contrib", "non-free"]
+arch       = ["amd64"]
+enabled    = false   # włącz tylko jeśli potrzebujesz symboli
+debugowania
