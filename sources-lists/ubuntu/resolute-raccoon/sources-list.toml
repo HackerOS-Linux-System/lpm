@@ -1,0 +1,48 @@
+# /etc/lpm/sources-list.toml
+# Konfiguracja repozytoriów lpm dla Ubuntu 26.04 LTS "Resolute Raccoon"
+# Wygenerowano dla architektury amd64
+
+# ─────────────────────────────────────────────────────────────
+#  GŁÓWNE REPOZYTORIA (MAIN, RESTRICTED, UNIVERSE, MULTIVERSE)
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "ubuntu-resolute-main"
+baseurl    = "http://archive.ubuntu.com/ubuntu"
+suite      = "resolute"
+components = ["main", "restricted", "universe", "multiverse"]
+arch       = ["amd64"]
+enabled    = true
+
+[[repo]]
+name       = "ubuntu-resolute-updates"
+baseurl    = "http://archive.ubuntu.com/ubuntu"
+suite      = "resolute-updates"
+components = ["main", "restricted", "universe", "multiverse"]
+arch       = ["amd64"]
+enabled    = true
+
+# ─────────────────────────────────────────────────────────────
+#  SECURITY
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "ubuntu-resolute-security"
+baseurl    = "http://security.ubuntu.com/ubuntu"
+suite      = "resolute-security"
+components = ["main", "restricted", "universe", "multiverse"]
+arch       = ["amd64"]
+enabled    = true
+
+# ─────────────────────────────────────────────────────────────
+#  BACKPORTS
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "ubuntu-resolute-backports"
+baseurl    = "http://archive.ubuntu.com/ubuntu"
+suite      = "resolute-backports"
+components = ["main", "restricted", "universe", "multiverse"]
+arch       = ["amd64"]
+enabled    
+= true
