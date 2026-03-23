@@ -1,0 +1,48 @@
+# /etc/lpm/sources-list.toml
+# Konfiguracja repozytoriów lpm dla Ubuntu 25.10 "Questing Quokka"
+# Wygenerowano dla architektury amd64
+
+# ─────────────────────────────────────────────────────────────
+#  GŁÓWNE REPOZYTORIA (MAIN, RESTRICTED, UNIVERSE, MULTIVERSE)
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "ubuntu-questing-main"
+baseurl    = "http://archive.ubuntu.com/ubuntu"
+suite      = "questing"
+components = ["main", "restricted", "universe", "multiverse"]
+arch       = ["amd64"]
+enabled    = true
+
+[[repo]]
+name       = "ubuntu-questing-updates"
+baseurl    = "http://archive.ubuntu.com/ubuntu"
+suite      = "questing-updates"
+components = ["main", "restricted", "universe", "multiverse"]
+arch       = ["amd64"]
+enabled    = true
+
+# ─────────────────────────────────────────────────────────────
+#  SECURITY
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "ubuntu-questing-security"
+baseurl    = "http://security.ubuntu.com/ubuntu"
+suite      = "questing-security"
+components = ["main", "restricted", "universe", "multiverse"]
+arch       = ["amd64"]
+enabled    = true
+
+# ─────────────────────────────────────────────────────────────
+#  BACKPORTS
+# ─────────────────────────────────────────────────────────────
+
+[[repo]]
+name       = "ubuntu-questing-backports"
+baseurl    = "http://archive.ubuntu.com/ubuntu"
+suite      = "questing-backports"
+components = ["main", "restricted", "universe", "multiverse"]
+arch       = ["amd64"]
+enabled    
+= true
