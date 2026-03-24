@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::Path;
 
 pub const DPKG_STATUS:    &str = "/var/lib/dpkg/status";
@@ -86,7 +86,7 @@ pub fn remove_from_dpkg(name: &str) {
     .collect();
 
     // Mark as deinstalled rather than removing entirely
-    // (dpkg convention — allows `dpkg --purge` later if needed)
+    // (dpkg convention – allows `dpkg --purge` later if needed)
     for block in &mut blocks {
         let is_pkg = block.lines().any(|l| {
             l.starts_with("Package:") &&
@@ -175,7 +175,7 @@ fn build_status_block(
     s
 }
 
-fn write_dpkg_list(name: &str, arch: &str, files: &[String]) {
+fn write_dpkg_list(name: &str, _arch: &str, files: &[String]) {
     let list_path = format!("{}/{}.list", DPKG_INFO_DIR, name);
     let content: String = files
     .iter()
