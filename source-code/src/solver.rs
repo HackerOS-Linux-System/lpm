@@ -47,10 +47,6 @@ impl<'a> Solver<'a> {
 
     // ──────────────────────────────────────────────────────────
     //  resolve_install
-    //
-    //  Recommends are OFF by default (no_recommends = true by default
-    //  in cli.rs). User must pass --with-recommends to enable them.
-    //  This matches DNF/zypper behaviour and avoids surprise bloat.
     // ──────────────────────────────────────────────────────────
 
     pub fn resolve_install(
@@ -92,9 +88,8 @@ impl<'a> Solver<'a> {
             // unless explicitly requested — they're already on the system
             let priority = avail.priority.as_deref().unwrap_or("");
             if !explicit && matches!(priority, "required" | "important" | "standard") {
-                // Still enqueue their deps if they're not installed
                 if !self.db.is_installed(&name) {
-                    self.enqueue_deps(&avail, true, &mut queue); // always no-recommends for system pkgs
+                    self.enqueue_deps(&avail, true, &mut queue);
                 }
                 continue;
             }
@@ -116,11 +111,9 @@ impl<'a> Solver<'a> {
                                 self.enqueue_deps(&avail, no_recommends, &mut queue);
                                 plan.to_install.push(avail);
                             }
-                            // else: up to date, skip
                         }
                     }
                 }
-                // dep already installed → satisfied
                 continue;
             }
 
@@ -133,6 +126,11 @@ impl<'a> Solver<'a> {
 
         plan.to_install.sort_by(|a, b| a.name.cmp(&b.name));
         plan.to_upgrade.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Sprawdź konflikty i przerwy przed zwróceniem planu
+        self.check_conflicts(&plan)?;
+        self.check_breaks(&plan)?;
+
         Ok(plan)
     }
 
@@ -142,9 +140,6 @@ impl<'a> Solver<'a> {
         no_recommends: bool,
         queue:         &mut VecDeque<(String, bool)>,
     ) {
-        // Always follow: Pre-Depends, Depends
-        // Only follow Recommends if --with-recommends is passed
-        // Never follow: Suggests
         let fields: &[Option<&str>] = &[
             pkg.pre_depends.as_deref(),
             pkg.depends.as_deref(),
@@ -153,7 +148,6 @@ impl<'a> Solver<'a> {
 
         for field in fields.iter().flatten() {
             for group in parse_dep_field(field) {
-                // Prefer an already-installed alternative
                 let chosen = group.alternatives.iter().find(|alt| {
                     if let Some(inst) = self.db.get(&alt.name) {
                         if let Some(ref c) = alt.constraint {
@@ -163,7 +157,6 @@ impl<'a> Solver<'a> {
                     }
                     false
                 })
-                // Otherwise prefer first alternative available in cache
                 .or_else(|| {
                     group.alternatives.iter().find(|alt| {
                         self.cache.get(&alt.name).is_some()
@@ -171,7 +164,6 @@ impl<'a> Solver<'a> {
                 });
 
                 if let Some(dep) = chosen {
-                    // Strip arch qualifier
                     let dep_name = dep.name.split(':').next().unwrap_or(&dep.name).to_owned();
                     queue.push_back((dep_name, false));
                 }
@@ -180,7 +172,93 @@ impl<'a> Solver<'a> {
     }
 
     // ──────────────────────────────────────────────────────────
-    //  resolve_remove
+    //  Sprawdzanie konfliktów i przerw
+    // ──────────────────────────────────────────────────────────
+
+    fn check_conflicts(&self, plan: &TransactionPlan) -> Result<()> {
+        for pkg in &plan.to_install {
+            if let Some(conflicts) = &pkg.conflicts {
+                for group in parse_dep_field(conflicts) {
+                    for alt in group.alternatives {
+                        if self.db.is_installed(&alt.name) {
+                            bail!(
+                                "{} conflicts with installed package {}",
+                                pkg.name, alt.name
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        for pkg in &plan.to_upgrade {
+            if let Some(conflicts) = &pkg.conflicts {
+                for group in parse_dep_field(conflicts) {
+                    for alt in group.alternatives {
+                        if self.db.is_installed(&alt.name) {
+                            bail!(
+                                "{} conflicts with installed package {}",
+                                pkg.name, alt.name
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_breaks(&self, plan: &TransactionPlan) -> Result<()> {
+        for pkg in &plan.to_install {
+            if let Some(breaks) = &pkg.breaks {
+                for group in parse_dep_field(breaks) {
+                    for alt in group.alternatives {
+                        if let Some(inst) = self.db.get(&alt.name) {
+                            if let Some(ref c) = alt.constraint {
+                                if version_satisfies(&inst.version, &c.op, &c.version) {
+                                    bail!(
+                                        "{} breaks installed package {} (version {})",
+                                          pkg.name, alt.name, inst.version
+                                    );
+                                }
+                            } else {
+                                bail!(
+                                    "{} breaks installed package {}",
+                                    pkg.name, alt.name
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for pkg in &plan.to_upgrade {
+            if let Some(breaks) = &pkg.breaks {
+                for group in parse_dep_field(breaks) {
+                    for alt in group.alternatives {
+                        if let Some(inst) = self.db.get(&alt.name) {
+                            if let Some(ref c) = alt.constraint {
+                                if version_satisfies(&inst.version, &c.op, &c.version) {
+                                    bail!(
+                                        "{} breaks installed package {} (version {})",
+                                          pkg.name, alt.name, inst.version
+                                    );
+                                }
+                            } else {
+                                bail!(
+                                    "{} breaks installed package {}",
+                                    pkg.name, alt.name
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ──────────────────────────────────────────────────────────
+    //  Pozostałe metody (remove, upgrade, autoremove)
     // ──────────────────────────────────────────────────────────
 
     pub fn resolve_remove(&self, names: &[String]) -> Result<TransactionPlan> {
@@ -197,10 +275,6 @@ impl<'a> Solver<'a> {
         Ok(plan)
     }
 
-    // ──────────────────────────────────────────────────────────
-    //  resolve_upgrade
-    // ──────────────────────────────────────────────────────────
-
     pub fn resolve_upgrade(&self) -> Result<TransactionPlan> {
         let mut plan = TransactionPlan::default();
         for inst in self.db.list_all()? {
@@ -214,12 +288,10 @@ impl<'a> Solver<'a> {
             }
         }
         plan.to_upgrade.sort_by(|a, b| a.name.cmp(&b.name));
+        self.check_conflicts(&plan)?;
+        self.check_breaks(&plan)?;
         Ok(plan)
     }
-
-    // ──────────────────────────────────────────────────────────
-    //  resolve_autoremove
-    // ──────────────────────────────────────────────────────────
 
     pub fn resolve_autoremove(&self) -> Result<TransactionPlan> {
         let mut plan = TransactionPlan::default();
@@ -262,7 +334,7 @@ impl<'a> Solver<'a> {
 
 fn package_physically_present(inst: &crate::db::InstalledPackage) -> bool {
     match inst.files.split(';').find(|s| !s.is_empty()) {
-        None    => true, // no file list → assume present
+        None    => true,
         Some(f) => std::path::Path::new(f).exists(),
     }
 }
