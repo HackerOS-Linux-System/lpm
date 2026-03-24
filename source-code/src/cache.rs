@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use std::collections::HashMap;
@@ -13,14 +13,8 @@ use crate::package::Package;
 pub const LISTS_DIR:   &str = "/var/lib/lpm/lists";
 pub const CACHE_DIR:   &str = "/var/cache/lpm";
 
-// ─────────────────────────────────────────────────────────────
-//  PackageCache
-// ─────────────────────────────────────────────────────────────
-
 pub struct PackageCache {
-    /// Primary map: name → best-version package
     by_name: HashMap<String, Package>,
-    /// All versions: name:arch:version → package
     all: HashMap<String, Package>,
 }
 
@@ -28,35 +22,50 @@ impl PackageCache {
     pub fn empty() -> Self {
         PackageCache {
             by_name: HashMap::new(),
-            all:     HashMap::new(),
+            all: HashMap::new(),
         }
     }
-
-    // ──────────────────────────────────────────────────────────
-    //  Disk load
-    // ──────────────────────────────────────────────────────────
 
     pub fn load() -> Result<Self> {
         let mut cache = Self::empty();
         let dir = Path::new(LISTS_DIR);
-        if !dir.exists() { return Ok(cache); }
+        if !dir.exists() {
+            eprintln!("{}", "Warning: package cache directory does not exist. Run `lpm update` first.".yellow());
+            return Ok(cache);
+        }
+
+        let mut loaded_files = 0;
+        let mut total_packages = 0;
 
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
-            let path  = entry.path();
+            let path = entry.path();
             if path.extension().map_or(false, |e| e == "pkgs") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    // Extract base_uri from filename comment if present
-                    let base_uri = extract_base_uri_comment(&content);
-                    let pkgs = Package::parse_index(&content);
-                    for mut pkg in pkgs {
-                        if pkg.repo_base_uri.is_none() {
-                            pkg.repo_base_uri = base_uri.clone();
-                        }
-                        cache.ingest(pkg);
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Warning: could not read {}: {}", path.display(), e);
+                        continue;
                     }
+                };
+                let base_uri = extract_base_uri_comment(&content);
+                let pkgs = Package::parse_index(&content);
+                let count = pkgs.len();
+                total_packages += count;
+                loaded_files += 1;
+                for mut pkg in pkgs {
+                    if pkg.repo_base_uri.is_none() {
+                        pkg.repo_base_uri = base_uri.clone();
+                    }
+                    cache.ingest(pkg);
                 }
             }
+        }
+
+        if loaded_files == 0 {
+            eprintln!("{}", "Warning: no package index files found in /var/lib/lpm/lists/. Run `lpm update` first.".yellow());
+        } else {
+            println!("Loaded {} packages from {} index files.", total_packages.to_string().green(), loaded_files.to_string().cyan());
         }
 
         Ok(cache)
@@ -67,31 +76,25 @@ impl PackageCache {
         self.all.insert(all_key, pkg.clone());
 
         let existing_newer = self.by_name.get(&pkg.name).map_or(false, |ex| {
-            crate::package::version_cmp(&ex.version, &pkg.version)
-            == std::cmp::Ordering::Greater
+            crate::package::version_cmp(&ex.version, &pkg.version) == std::cmp::Ordering::Greater
         });
         if !existing_newer {
             self.by_name.insert(pkg.name.clone(), pkg);
         }
     }
 
-    // ──────────────────────────────────────────────────────────
-    //  Update (download indexes)
-    // ──────────────────────────────────────────────────────────
-
     pub async fn update(sources: &SourcesList, client: &HttpClient) -> Result<()> {
         let arch = detect_arch();
         let urls = sources.index_urls(&arch);
 
         if urls.is_empty() {
-            anyhow::bail!("No repositories configured. Check /etc/apt/sources.list");
+            anyhow::bail!("No repositories configured. Check /etc/lpm/sources.list");
         }
 
         std::fs::create_dir_all(LISTS_DIR)
         .context("Cannot create lists directory /var/lib/lpm/lists")?;
 
         let mp = MultiProgress::new();
-
         let spinner_style = ProgressStyle::with_template(
             "  {spinner:.cyan}  {prefix:<35.bold} {wide_msg}",
         )
@@ -129,7 +132,6 @@ impl PackageCache {
 
             match result {
                 Ok(content) => {
-                    // Prepend a base_uri comment for later retrieval
                     let stored = format!("# lpm-base-uri: {}\n{}", base_uri, content);
                     let fname  = url_to_cache_name(&url_info.url);
                     let dest   = PathBuf::from(LISTS_DIR).join(format!("{}.pkgs", fname));
@@ -160,10 +162,6 @@ impl PackageCache {
 
         Ok(())
     }
-
-    // ──────────────────────────────────────────────────────────
-    //  Queries
-    // ──────────────────────────────────────────────────────────
 
     pub fn get(&self, name: &str) -> Option<&Package> {
         self.by_name.get(name)
@@ -211,12 +209,7 @@ impl PackageCache {
     pub fn len(&self) -> usize { self.by_name.len() }
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Helpers
-// ─────────────────────────────────────────────────────────────
-
 async fn fetch_index(client: &HttpClient, info: &IndexUrl) -> Result<String> {
-    // Try compressed variants first
     for suffix in &[".xz", ".gz", ".bz2", ""] {
         let url = format!("{}{}", info.url, suffix);
         match client.get_bytes(&url).await {
@@ -269,7 +262,6 @@ fn extract_base_uri_comment(content: &str) -> Option<String> {
 }
 
 pub fn detect_arch() -> String {
-    // Try uname first
     if let Ok(out) = std::process::Command::new("uname").arg("-m").output() {
         if out.status.success() {
             let m = String::from_utf8_lossy(&out.stdout).trim().to_owned();
