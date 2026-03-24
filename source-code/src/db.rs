@@ -40,10 +40,17 @@ pub enum InstallReason {
 
 impl InstallReason {
     pub fn as_str(&self) -> &'static str {
-        match self { InstallReason::User => "user", InstallReason::Dependency => "dep" }
+        match self {
+            InstallReason::User => "user",
+            InstallReason::Dependency => "dep",
+        }
     }
     pub fn from_str(s: &str) -> Self {
-        if s == "dep" { InstallReason::Dependency } else { InstallReason::User }
+        if s == "dep" {
+            InstallReason::Dependency
+        } else {
+            InstallReason::User
+        }
     }
 }
 
@@ -51,7 +58,7 @@ impl InstallReason {
 //  HistoryEntry
 // ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub id:        i64,
     pub action:    String,   // install | remove | upgrade
@@ -134,20 +141,22 @@ impl InstalledDb {
     }
 
     pub fn get(&self, name: &str) -> Option<InstalledPackage> {
-        self.conn.query_row(
+        self.conn
+        .query_row(
             "SELECT name,version,architecture,installed_size_kb,section,maintainer,
             description_short,installed_at,reason,files,depends,recommends
             FROM installed WHERE name = ?1",
             params![name],
             row_to_installed,
-        ).ok()
+        )
+        .ok()
     }
 
     pub fn list_all(&self) -> Result<Vec<InstalledPackage>> {
         let mut stmt = self.conn.prepare(
             "SELECT name,version,architecture,installed_size_kb,section,maintainer,
             description_short,installed_at,reason,files,depends,recommends
-            FROM installed ORDER BY name"
+            FROM installed ORDER BY name",
         )?;
         let rows = stmt.query_map([], row_to_installed)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -157,7 +166,7 @@ impl InstalledDb {
         let mut stmt = self.conn.prepare(
             "SELECT name,version,architecture,installed_size_kb,section,maintainer,
             description_short,installed_at,reason,files,depends,recommends
-            FROM installed WHERE reason = 'user' ORDER BY name"
+            FROM installed WHERE reason = 'user' ORDER BY name",
         )?;
         let rows = stmt.query_map([], row_to_installed)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -175,11 +184,11 @@ impl InstalledDb {
 
     pub fn record_install(
         &self,
-        pkg:    &Package,
+        pkg: &Package,
         reason: InstallReason,
-        files:  &[String],
+        files: &[String],
     ) -> Result<()> {
-        let now  = Utc::now().to_rfc3339();
+        let now = Utc::now().to_rfc3339();
         let fstr = files.join(";");
 
         self.conn.execute(
@@ -206,7 +215,7 @@ impl InstalledDb {
     }
 
     pub fn record_upgrade(&self, old_ver: &str, pkg: &Package, files: &[String]) -> Result<()> {
-        let now  = Utc::now().to_rfc3339();
+        let now = Utc::now().to_rfc3339();
         let fstr = files.join(";");
 
         self.conn.execute(
@@ -251,19 +260,19 @@ impl InstalledDb {
     }
 
     // ──────────────────────────────────────────────────────────
-    //  History
+    //  History (extended for undo/redo)
     // ──────────────────────────────────────────────────────────
 
     pub fn history(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT id,action,package,old_ver,new_ver,timestamp
-            FROM history ORDER BY id DESC LIMIT ?1"
+            FROM history ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             let ts: String = row.get(5)?;
             Ok(HistoryEntry {
-                id:      row.get(0)?,
-               action:  row.get(1)?,
+                id: row.get(0)?,
+               action: row.get(1)?,
                package: row.get(2)?,
                old_ver: row.get(3)?,
                new_ver: row.get(4)?,
@@ -273,6 +282,33 @@ impl InstalledDb {
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn get_history_entry(&self, id: i64) -> Result<Option<HistoryEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,action,package,old_ver,new_ver,timestamp FROM history WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            let ts: String = row.get(5)?;
+            Ok(Some(HistoryEntry {
+                id: row.get(0)?,
+                    action: row.get(1)?,
+                    package: row.get(2)?,
+                    old_ver: row.get(3)?,
+                    new_ver: row.get(4)?,
+                    timestamp: DateTime::parse_from_rfc3339(&ts)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn delete_history_entry(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM history WHERE id = ?1", params![id])?;
+        Ok(())
     }
 
     // ──────────────────────────────────────────────────────────
@@ -295,19 +331,19 @@ impl InstalledDb {
 fn row_to_installed(row: &rusqlite::Row) -> rusqlite::Result<InstalledPackage> {
     let ts: String = row.get(7)?;
     Ok(InstalledPackage {
-        name:              row.get(0)?,
-       version:           row.get(1)?,
-       architecture:      row.get(2)?,
+        name: row.get(0)?,
+       version: row.get(1)?,
+       architecture: row.get(2)?,
        installed_size_kb: row.get::<_, i64>(3)? as u64,
-       section:           row.get(4)?,
-       maintainer:        row.get(5)?,
+       section: row.get(4)?,
+       maintainer: row.get(5)?,
        description_short: row.get(6)?,
-       installed_at:      DateTime::parse_from_rfc3339(&ts)
+       installed_at: DateTime::parse_from_rfc3339(&ts)
        .map(|d| d.with_timezone(&Utc))
        .unwrap_or_else(|_| Utc::now()),
-       reason:            InstallReason::from_str(&row.get::<_, String>(8)?),
-       files:             row.get(9)?,
-       depends:           row.get(10)?,
-       recommends:        row.get(11)?,
+       reason: InstallReason::from_str(&row.get::<_, String>(8)?),
+       files: row.get(9)?,
+       depends: row.get(10)?,
+       recommends: row.get(11)?,
     })
 }
