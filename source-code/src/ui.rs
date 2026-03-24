@@ -1,5 +1,3 @@
-//! DNF-identical terminal UI for lpm.
-
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use std::io::{self, Write};
@@ -63,20 +61,14 @@ pub fn info(msg: &str) {
 
 // ─────────────────────────────────────────────────────────────
 //  Transaction table
-//
-//  ================================================================================
-//   Package          Arch      Version              Repository          Size
-//  ================================================================================
-//  Installing:
-//   vim              x86_64    9.1.0-1              debian-main         1.6 M
 // ─────────────────────────────────────────────────────────────
 
 pub fn print_transaction_table(plan: &TransactionPlan, arch: &str) {
-    let w      = term_width();
-    let bar    = "=".repeat(w);
+    let w = term_width();
+    let bar = "=".repeat(w);
     let name_w = 28usize;
     let arch_w = 9usize;
-    let ver_w  = 26usize;
+    let ver_w = 26usize;
     let repo_w = 18usize;
 
     println!("{}", bar.bold());
@@ -141,7 +133,7 @@ fn repo_short(pkg: &Package) -> &str {
 }
 
 fn print_pkg_row(pkg: &Package, arch: &str, nw: usize, aw: usize, vw: usize, rw: usize) {
-    let repo     = repo_short(pkg);
+    let repo = repo_short(pkg);
     let size_str = pkg.download_size.map(human_size).unwrap_or_else(|| "?".to_string());
 
     println!(
@@ -155,8 +147,8 @@ fn print_pkg_row(pkg: &Package, arch: &str, nw: usize, aw: usize, vw: usize, rw:
 }
 
 fn print_upgrade_row(pkg: &Package, old: &str, arch: &str, nw: usize, aw: usize, vw: usize, rw: usize) {
-    let repo        = repo_short(pkg);
-    let size_str    = pkg.download_size.map(human_size).unwrap_or_else(|| "?".to_string());
+    let repo = repo_short(pkg);
+    let size_str = pkg.download_size.map(human_size).unwrap_or_else(|| "?".to_string());
     let ver_display = format!("{} -> {}", old, pkg.version);
 
     println!(
@@ -171,15 +163,6 @@ fn print_upgrade_row(pkg: &Package, old: &str, arch: &str, nw: usize, aw: usize,
 
 // ─────────────────────────────────────────────────────────────
 //  Transaction Summary
-//
-//  Transaction Summary
-//  ================================================================================
-//  Install   3 Packages
-//  Upgrade   1 Package
-//
-//  Total download size: 8.7 M
-//  Installed size: 28 M
-//  Is this ok [y/N]:
 // ─────────────────────────────────────────────────────────────
 
 pub fn print_transaction_summary(plan: &TransactionPlan) {
@@ -280,7 +263,7 @@ pub fn make_overall_bar(total_bytes: u64) -> ProgressBar {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Running transaction steps  (DNF-identical)
+//  Running transaction steps
 // ─────────────────────────────────────────────────────────────
 
 pub fn print_running_transaction() {
@@ -326,7 +309,9 @@ pub fn print_remove_step(pkg_label: &str, current: usize, total: usize) {
 // ─────────────────────────────────────────────────────────────
 
 pub fn print_installed_summary(pkgs: &[Package]) {
-    if pkgs.is_empty() { return; }
+    if pkgs.is_empty() {
+        return;
+    }
     println!();
     println!("{}:", "Installed".green().bold());
     for p in pkgs {
@@ -338,7 +323,9 @@ pub fn print_upgraded_summary(
     pkgs: &[Package],
     from: &std::collections::HashMap<String, String>,
 ) {
-    if pkgs.is_empty() { return; }
+    if pkgs.is_empty() {
+        return;
+    }
     println!();
     println!("{}:", "Upgraded".yellow().bold());
     for p in pkgs {
@@ -354,7 +341,9 @@ pub fn print_upgraded_summary(
 }
 
 pub fn print_removed_summary(names: &[String]) {
-    if names.is_empty() { return; }
+    if names.is_empty() {
+        return;
+    }
     println!();
     println!("{}:", "Removed".red().bold());
     for n in names {
@@ -414,9 +403,9 @@ pub fn print_package_info(pkg: &Package, is_installed: bool, installed_ver: Opti
         println!("{:<20}: {}", label.bold(), value);
     };
 
-    field("Name",         &pkg.name);
-    field("Epoch",        "0");
-    field("Version",      &pkg.version);
+    field("Name", &pkg.name);
+    field("Epoch", "0");
+    field("Version", &pkg.version);
     field("Architecture", &pkg.architecture);
 
     if is_installed {
@@ -430,8 +419,12 @@ pub fn print_package_info(pkg: &Package, is_installed: bool, installed_ver: Opti
         field("Status", &"Available".yellow().to_string());
     }
 
-    if let Some(ref s) = pkg.section    { field("Section",    s); }
-    if let Some(ref m) = pkg.maintainer { field("Maintainer", m); }
+    if let Some(ref s) = pkg.section {
+        field("Section", s);
+    }
+    if let Some(ref m) = pkg.maintainer {
+        field("Maintainer", m);
+    }
 
     if let Some(sz) = pkg.installed_size_kb {
         field("Size", &human_size(sz * 1024));
@@ -439,14 +432,22 @@ pub fn print_package_info(pkg: &Package, is_installed: bool, installed_ver: Opti
     if let Some(sz) = pkg.download_size {
         field("Download size", &human_size(sz));
     }
-    if let Some(ref h) = pkg.homepage { field("URL", h); }
+    if let Some(ref h) = pkg.homepage {
+        field("URL", h);
+    }
 
     let repo = repo_short(pkg);
     field("Repo", repo);
 
-    if let Some(ref d) = pkg.depends    { field("Requires",   d); }
-    if let Some(ref r) = pkg.recommends { field("Recommends", r); }
-    if let Some(ref c) = pkg.conflicts  { field("Conflicts",  c); }
+    if let Some(ref d) = pkg.depends {
+        field("Requires", d);
+    }
+    if let Some(ref r) = pkg.recommends {
+        field("Recommends", r);
+    }
+    if let Some(ref c) = pkg.conflicts {
+        field("Conflicts", c);
+    }
 
     println!("{}", "=".repeat(w).dimmed());
 
@@ -473,12 +474,12 @@ pub fn print_package_info(pkg: &Package, is_installed: bool, installed_ver: Opti
 // ─────────────────────────────────────────────────────────────
 
 pub fn print_list_entry(
-    name:         &str,
-    version:      &str,
-    arch:         &str,
+    name: &str,
+    version: &str,
+    arch: &str,
     is_installed: bool,
-    repo:         &str,
-    new_version:  Option<&str>,
+    repo: &str,
+    new_version: Option<&str>,
 ) {
     let repo_tag = if is_installed {
         if let Some(nv) = new_version {
@@ -518,16 +519,16 @@ pub fn print_history(entries: &[HistoryEntry]) {
     for e in entries {
         let action_str = match e.action.as_str() {
             "install" => format!("{:<12}", "Install".green().bold()),
-            "remove"  => format!("{:<12}", "Erase".red().bold()),
+            "remove" => format!("{:<12}", "Erase".red().bold()),
             "upgrade" => format!("{:<12}", "Upgrade".yellow().bold()),
-            other     => format!("{:<12}", other),
+            other => format!("{:<12}", other),
         };
 
         let pkg_ver = match (&e.old_ver, &e.new_ver) {
-            (None,       Some(nv)) => nv.clone(),
-            (Some(ov),   None    ) => ov.clone(),
-            (Some(ov), Some(nv)  ) => format!("{} -> {}", ov.dimmed(), nv.bright_cyan()),
-            _                      => String::new(),
+            (None, Some(nv)) => nv.clone(),
+            (Some(ov), None) => ov.clone(),
+            (Some(ov), Some(nv)) => format!("{} -> {}", ov.dimmed(), nv.bright_cyan()),
+            _ => String::new(),
         };
 
         let date_str = e.timestamp.format("%Y-%m-%d %H:%M").to_string();
@@ -577,9 +578,17 @@ pub fn human_size(bytes: u64) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { s } else { &s[..max] }
+    if s.len() <= max {
+        s
+    } else {
+        &s[..max]
+    }
 }
 
 fn truncate_owned(s: String, max: usize) -> String {
-    if s.len() <= max { s } else { s[..max].to_string() }
+    if s.len() <= max {
+        s
+    } else {
+        s[..max].to_string()
+    }
 }
