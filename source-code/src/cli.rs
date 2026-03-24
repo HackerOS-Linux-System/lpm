@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use lexopt::prelude::*;
 use owo_colors::OwoColorize;
 
@@ -12,23 +12,99 @@ use crate::log;
 use crate::solver::Solver;
 use crate::ui;
 
+use crate::keyring;
+use crate::repo;
+
 // ─────────────────────────────────────────────────────────────
 //  Command enum
 // ─────────────────────────────────────────────────────────────
 
 pub enum Command {
-    Install      { packages: Vec<String>, assume_yes: bool, with_recommends: bool },
-    Remove       { packages: Vec<String>, assume_yes: bool, purge: bool },
+    Install {
+        packages: Vec<String>,
+        assume_yes: bool,
+        with_recommends: bool,
+    },
+    Remove {
+        packages: Vec<String>,
+        assume_yes: bool,
+        purge: bool,
+    },
     Update,
-    Upgrade      { assume_yes: bool },
-    Autoremove   { assume_yes: bool },
-    Search       { query: String, installed: bool },
-    Info         { package: String },
-    List         { installed: bool, upgradeable: bool, available: bool },
+    Upgrade {
+        assume_yes: bool,
+        only: Option<String>,
+        security: bool,
+    },
+    Autoremove {
+        assume_yes: bool,
+    },
+    Search {
+        query: String,
+        installed: bool,
+        repo: Option<String>,
+        section: Option<String>,
+        exact: bool,
+        provides: Option<String>,
+    },
+    Info {
+        package: String,
+    },
+    List {
+        installed: bool,
+        upgradeable: bool,
+        available: bool,
+    },
     Clean,
-    History,
+    History {
+        subcmd: Option<HistorySubcmd>,
+    },
+    Repo {
+        action: RepoAction,
+    },
+    Key {
+        action: KeyAction,
+    },
+    WhatProvides {
+        file: String,
+    },
+    Provides {
+        file: String,
+    },
+    CheckUpdate,
+    ImportDpkg,
     Version,
     Help,
+}
+
+pub enum RepoAction {
+    List,
+    Add {
+        uri: String,
+        suite: String,
+        components: Vec<String>,
+    },
+    Remove {
+        id: usize,
+    },
+    Enable {
+        id: usize,
+    },
+    Disable {
+        id: usize,
+    },
+}
+
+pub enum KeyAction {
+    Add { path: String },
+    List,
+}
+
+pub enum HistorySubcmd {
+    Undo { id: i64 },
+    Redo { id: i64 },
+    Diff { id1: i64, id2: i64 },
+    Export { path: String },
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -40,7 +116,7 @@ pub fn parse_args() -> Result<Command> {
 
     let sub = match parser.next()? {
         Some(Value(v)) => v.to_string_lossy().to_string(),
-        Some(Short('h')) | Some(Long("help"))    => return Ok(Command::Help),
+        Some(Short('h')) | Some(Long("help")) => return Ok(Command::Help),
         Some(Short('V')) | Some(Long("version")) => return Ok(Command::Version),
         None => return Ok(Command::Help),
         _ => bail!("Unexpected argument. Run `lpm help` for usage."),
@@ -48,9 +124,9 @@ pub fn parse_args() -> Result<Command> {
 
     match sub.as_str() {
         "install" | "i" | "in" => {
-            let mut pkgs  = Vec::new();
-            let mut yes   = false;
-            let mut with_rec = false; // Recommends OFF by default
+            let mut pkgs = Vec::new();
+            let mut yes = false;
+            let mut with_rec = false;
             while let Some(arg) = parser.next()? {
                 match arg {
                     Short('y') | Long("yes") | Long("assumeyes") => yes = true,
@@ -60,13 +136,19 @@ pub fn parse_args() -> Result<Command> {
                     _ => bail!("Unknown flag: {}", arg.unexpected()),
                 }
             }
-            if pkgs.is_empty() { bail!("No packages specified. Usage: lpm install <pkg...>"); }
-            Ok(Command::Install { packages: pkgs, assume_yes: yes, with_recommends: with_rec })
+            if pkgs.is_empty() {
+                bail!("No packages specified. Usage: lpm install <pkg...>");
+            }
+            Ok(Command::Install {
+                packages: pkgs,
+                assume_yes: yes,
+                with_recommends: with_rec,
+            })
         }
 
         "remove" | "rm" | "erase" => {
-            let mut pkgs  = Vec::new();
-            let mut yes   = false;
+            let mut pkgs = Vec::new();
+            let mut yes = false;
             let mut purge = false;
             while let Some(arg) = parser.next()? {
                 match arg {
@@ -76,21 +158,37 @@ pub fn parse_args() -> Result<Command> {
                     _ => bail!("Unknown flag: {}", arg.unexpected()),
                 }
             }
-            if pkgs.is_empty() { bail!("No packages specified. Usage: lpm remove <pkg...>"); }
-            Ok(Command::Remove { packages: pkgs, assume_yes: yes, purge })
+            if pkgs.is_empty() {
+                bail!("No packages specified. Usage: lpm remove <pkg...>");
+            }
+            Ok(Command::Remove {
+                packages: pkgs,
+                assume_yes: yes,
+                purge,
+            })
         }
 
         "update" | "makecache" => Ok(Command::Update),
 
         "upgrade" | "dist-upgrade" => {
             let mut yes = false;
+            let mut only = None;
+            let mut security = false;
             while let Some(arg) = parser.next()? {
                 match arg {
-                    Short('y') | Long("yes") | Long("assumeyes") => yes = true,
+                    Short('y') | Long("yes") => yes = true,
+                    Long("only") => {
+                        only = Some(parser.value()?.to_string_lossy().to_string());
+                    }
+                    Long("security") => security = true,
                     _ => bail!("Unknown flag: {}", arg.unexpected()),
                 }
             }
-            Ok(Command::Upgrade { assume_yes: yes })
+            Ok(Command::Upgrade {
+                assume_yes: yes,
+                only,
+                security,
+            })
         }
 
         "autoremove" | "auto-remove" => {
@@ -106,19 +204,45 @@ pub fn parse_args() -> Result<Command> {
 
         "search" | "se" | "find" => {
             let mut installed = false;
-            let mut query     = String::new();
+            let mut repo = None;
+            let mut section = None;
+            let mut exact = false;
+            let mut provides = None;
+            let mut query = String::new();
+
             while let Some(arg) = parser.next()? {
                 match arg {
                     Long("installed") => installed = true,
+                    Long("repo") => {
+                        repo = Some(parser.value()?.to_string_lossy().to_string());
+                    }
+                    Long("section") => {
+                        section = Some(parser.value()?.to_string_lossy().to_string());
+                    }
+                    Long("exact") => exact = true,
+                    Long("provides") => {
+                        provides = Some(parser.value()?.to_string_lossy().to_string());
+                    }
                     Value(v) => {
-                        if !query.is_empty() { query.push(' '); }
+                        if !query.is_empty() {
+                            query.push(' ');
+                        }
                         query.push_str(&v.to_string_lossy());
                     }
                     _ => bail!("Unknown flag: {}", arg.unexpected()),
                 }
             }
-            if query.is_empty() { bail!("No search query. Usage: lpm search <query>"); }
-            Ok(Command::Search { query, installed })
+            if query.is_empty() {
+                bail!("No search query. Usage: lpm search <query>");
+            }
+            Ok(Command::Search {
+                query,
+                installed,
+                repo,
+                section,
+                exact,
+                provides,
+            })
         }
 
         "info" | "show" | "information" => {
@@ -130,38 +254,185 @@ pub fn parse_args() -> Result<Command> {
         }
 
         "list" | "ls" => {
-            let mut installed   = false;
+            let mut installed = false;
             let mut upgradeable = false;
-            let mut available   = false;
+            let mut available = false;
             while let Some(arg) = parser.next()? {
                 match arg {
-                    Long("installed")  => installed   = true,
+                    Long("installed") => installed = true,
                     Long("upgrades") | Long("upgradeable") => upgradeable = true,
-                    Long("available")  => available   = true,
+                    Long("available") => available = true,
                     _ => bail!("Unknown flag: {}", arg.unexpected()),
                 }
             }
-            Ok(Command::List { installed, upgradeable, available })
+            Ok(Command::List {
+                installed,
+                upgradeable,
+                available,
+            })
         }
 
         "clean" | "autoclean" => Ok(Command::Clean),
-        "history" | "log"     => Ok(Command::History),
+
+        "history" | "log" => {
+            let mut subcmd = None;
+            if let Some(arg) = parser.next()? {
+                match arg {
+                    Value(v) => {
+                        let val = v.to_string_lossy().to_string();
+                        match val.as_ref() {
+                            "undo" => {
+                                let id = parser
+                                .value()?
+                                .to_string_lossy()
+                                .parse()
+                                .map_err(|_| anyhow::anyhow!("Invalid ID"))?;
+                                subcmd = Some(HistorySubcmd::Undo { id });
+                            }
+                            "redo" => {
+                                let id = parser
+                                .value()?
+                                .to_string_lossy()
+                                .parse()
+                                .map_err(|_| anyhow::anyhow!("Invalid ID"))?;
+                                subcmd = Some(HistorySubcmd::Redo { id });
+                            }
+                            "diff" => {
+                                let id1 = parser
+                                .value()?
+                                .to_string_lossy()
+                                .parse()
+                                .map_err(|_| anyhow::anyhow!("Invalid ID1"))?;
+                                let id2 = parser
+                                .value()?
+                                .to_string_lossy()
+                                .parse()
+                                .map_err(|_| anyhow::anyhow!("Invalid ID2"))?;
+                                subcmd = Some(HistorySubcmd::Diff { id1, id2 });
+                            }
+                            "export" => {
+                                let path = parser.value()?.to_string_lossy().to_string();
+                                subcmd = Some(HistorySubcmd::Export { path });
+                            }
+                            _ => bail!("Unknown history subcommand: {}", val),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Command::History { subcmd })
+        }
+
+        "repo" => {
+            let mut action = RepoAction::List;
+            if let Some(arg) = parser.next()? {
+                match arg {
+                    Value(v) => {
+                        let val = v.to_string_lossy().to_string();
+                        match val.as_ref() {
+                            "list" => {}
+                            "add" => {
+                                let uri = parser.value()?.to_string_lossy().to_string();
+                                let suite = parser.value()?.to_string_lossy().to_string();
+                                let mut components = Vec::new();
+                                while let Ok(Some(Value(c))) = parser.next() {
+                                    components.push(c.to_string_lossy().to_string());
+                                }
+                                if components.is_empty() {
+                                    bail!("No components given for repo add");
+                                }
+                                action = RepoAction::Add { uri, suite, components };
+                            }
+                            "remove" => {
+                                let id = parser
+                                .value()?
+                                .to_string_lossy()
+                                .parse()
+                                .map_err(|_| anyhow::anyhow!("Invalid ID"))?;
+                                action = RepoAction::Remove { id };
+                            }
+                            "enable" => {
+                                let id = parser
+                                .value()?
+                                .to_string_lossy()
+                                .parse()
+                                .map_err(|_| anyhow::anyhow!("Invalid ID"))?;
+                                action = RepoAction::Enable { id };
+                            }
+                            "disable" => {
+                                let id = parser
+                                .value()?
+                                .to_string_lossy()
+                                .parse()
+                                .map_err(|_| anyhow::anyhow!("Invalid ID"))?;
+                                action = RepoAction::Disable { id };
+                            }
+                            _ => bail!("Unknown repo subcommand: {}", val),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Command::Repo { action })
+        }
+
+        "key" => {
+            let mut action = KeyAction::List;
+            if let Some(arg) = parser.next()? {
+                match arg {
+                    Value(v) => {
+                        let val = v.to_string_lossy().to_string();
+                        match val.as_ref() {
+                            "list" => {}
+                            "add" => {
+                                let path = parser.value()?.to_string_lossy().to_string();
+                                action = KeyAction::Add { path };
+                            }
+                            _ => bail!("Unknown key subcommand: {}", val),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Command::Key { action })
+        }
+
+        "whatprovides" => {
+            let file = match parser.next()? {
+                Some(Value(v)) => v.to_string_lossy().to_string(),
+                _ => bail!("No file specified. Usage: lpm whatprovides <file>"),
+            };
+            Ok(Command::WhatProvides { file })
+        }
+
+        "provides" => {
+            let file = match parser.next()? {
+                Some(Value(v)) => v.to_string_lossy().to_string(),
+                _ => bail!("No file specified. Usage: lpm provides <file>"),
+            };
+            Ok(Command::Provides { file })
+        }
+
+        "check-update" => Ok(Command::CheckUpdate),
+
+        "import-dpkg" => Ok(Command::ImportDpkg),
+
         "version" | "--version" | "-V" => Ok(Command::Version),
-        "help"    | "--help"    | "-h" => Ok(Command::Help),
+        "help" | "--help" | "-h" => Ok(Command::Help),
 
         other => bail!("Unknown command: '{}'. Run `lpm help`.", other),
     }
 }
 
 // ─────────────────────────────────────────────────────────────
-//  update
+//  Command implementations
 // ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_update() -> Result<()> {
     log::info("command: update");
     let sources = SourcesList::load()?;
     if sources.entries.is_empty() {
-        bail!("No repositories configured. Check /etc/apt/sources.list");
+        bail!("No repositories configured. Check /etc/lpm/sources.list");
     }
     let client = download::HttpClient::new();
     PackageCache::update(&sources, &client).await?;
@@ -170,19 +441,27 @@ pub async fn cmd_update() -> Result<()> {
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────
-//  install
-// ─────────────────────────────────────────────────────────────
-
-pub async fn cmd_install(names: &[String], assume_yes: bool, with_recommends: bool) -> Result<()> {
+pub async fn cmd_install(
+    names: &[String],
+    assume_yes: bool,
+    with_recommends: bool,
+) -> Result<()> {
     log::transaction_start("install", names);
     ui::last_metadata_check();
 
-    let cache  = PackageCache::load()?;
-    let db     = InstalledDb::open()?;
-    let solver = Solver::new(&cache, &db);
-    let arch   = detect_arch();
+    let cache = PackageCache::load()?;
+    if cache.len() == 0 {
+        bail!("Package cache is empty. Run `lpm update` first.");
+    }
 
+    let db = InstalledDb::open()?;
+
+    #[cfg(feature = "sat-solver")]
+    let plan = crate::solver_sat::resolve_with_sat(&cache, &db, names, !with_recommends)?;
+
+    #[cfg(not(feature = "sat-solver"))]
+    let solver = Solver::new(&cache, &db);
+    #[cfg(not(feature = "sat-solver"))]
     let plan = solver.resolve_install(names, !with_recommends)?;
 
     if plan.is_empty() {
@@ -192,6 +471,7 @@ pub async fn cmd_install(names: &[String], assume_yes: bool, with_recommends: bo
         return Ok(());
     }
 
+    let arch = detect_arch();
     let install_names: Vec<String> = plan.to_install.iter().map(|p| p.name.clone()).collect();
     let upgrade_names: Vec<String> = plan.to_upgrade.iter().map(|p| p.name.clone()).collect();
     log::info(&format!("plan: install={:?} upgrade={:?}", install_names, upgrade_names));
@@ -210,42 +490,53 @@ pub async fn cmd_install(names: &[String], assume_yes: bool, with_recommends: bo
         println!("{}", "Running with -y, assuming yes.".dimmed());
     }
 
-    // Download
     let all_pkgs: Vec<_> = plan.to_install.iter().chain(plan.to_upgrade.iter()).cloned().collect();
     let results = if !all_pkgs.is_empty() {
         println!();
         let client = download::HttpClient::new();
         download::download_packages(&client, &all_pkgs).await?
-    } else { vec![] };
+    } else {
+        vec![]
+    };
 
     println!();
     ui::print_running_transaction();
 
     let total = results.len();
     for (i, dl) in results.iter().enumerate() {
-        let is_upgrade  = plan.upgrade_from.contains_key(&dl.package.name);
+        let is_upgrade = plan.upgrade_from.contains_key(&dl.package.name);
         let old_version = plan.upgrade_from.get(&dl.package.name).cloned();
-        let reason      = if names.iter().any(|n| n == &dl.package.name) {
+        let reason = if names.iter().any(|n| n == &dl.package.name) {
             InstallReason::User
         } else {
             InstallReason::Dependency
         };
 
         let action = if is_upgrade { "Upgrading" } else { "Installing" };
-        let label  = format!("{}-{}.{}", dl.package.name, dl.package.version, dl.package.architecture);
+        let label = format!(
+            "{}-{}.{}",
+            dl.package.name, dl.package.version, dl.package.architecture
+        );
         ui::print_install_step(action, &label, i + 1, total);
 
         let deb_bytes = std::fs::read(&dl.path)?;
-        let deb       = DebPackage::parse(&deb_bytes)?;
+        let deb = DebPackage::parse(&deb_bytes)?;
         let job = InstallJob {
-            pkg: dl.package.clone(), deb, path: dl.path.clone(),
-            reason, is_upgrade, old_version,
+            pkg: dl.package.clone(),
+            deb,
+            path: dl.path.clone(),
+            reason,
+            is_upgrade,
+            old_version,
         };
         install_package(&job, &db)?;
     }
 
     for (i, dl) in results.iter().enumerate() {
-        let label = format!("{}-{}.{}", dl.package.name, dl.package.version, dl.package.architecture);
+        let label = format!(
+            "{}-{}.{}",
+            dl.package.name, dl.package.version, dl.package.architecture
+        );
         ui::print_verify_step(&label, i + 1, total);
     }
 
@@ -258,18 +549,14 @@ pub async fn cmd_install(names: &[String], assume_yes: bool, with_recommends: bo
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────
-//  remove
-// ─────────────────────────────────────────────────────────────
-
 pub async fn cmd_remove(names: &[String], assume_yes: bool, purge: bool) -> Result<()> {
     log::transaction_start("remove", names);
     ui::last_metadata_check();
 
-    let cache  = PackageCache::load()?;
-    let db     = InstalledDb::open()?;
+    let cache = PackageCache::load()?;
+    let db = InstalledDb::open()?;
     let solver = Solver::new(&cache, &db);
-    let arch   = detect_arch();
+    let arch = detect_arch();
 
     let plan = solver.resolve_remove(names)?;
 
@@ -303,9 +590,15 @@ pub async fn cmd_remove(names: &[String], assume_yes: bool, purge: bool) -> Resu
     for (i, name) in plan.to_remove.iter().enumerate() {
         let inst = match db.get(name) {
             Some(p) => p,
-            None => { ui::warn(&format!("'{}' vanished from DB", name)); continue; }
+            None => {
+                ui::warn(&format!("'{}' vanished from DB", name));
+                continue;
+            }
         };
-        let label = format!("{}-{}.{}", inst.name, inst.version, inst.architecture);
+        let label = format!(
+            "{}-{}.{}",
+            inst.name, inst.version, inst.architecture
+        );
         ui::print_remove_step(&label, i + 1, total);
         remove_package(&inst, &db, purge)?;
         removed_names.push(name.clone());
@@ -319,19 +612,49 @@ pub async fn cmd_remove(names: &[String], assume_yes: bool, purge: bool) -> Resu
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────
-//  upgrade
-// ─────────────────────────────────────────────────────────────
-
-pub async fn cmd_upgrade(assume_yes: bool) -> Result<()> {
+pub async fn cmd_upgrade(
+    assume_yes: bool,
+    only: Option<String>,
+    security: bool,
+) -> Result<()> {
     log::info("command: upgrade");
     ui::last_metadata_check();
 
-    let cache  = PackageCache::load()?;
-    let db     = InstalledDb::open()?;
+    let cache = PackageCache::load()?;
+    let db = InstalledDb::open()?;
     let solver = Solver::new(&cache, &db);
-    let arch   = detect_arch();
-    let plan   = solver.resolve_upgrade()?;
+    let arch = detect_arch();
+
+    let mut plan = solver.resolve_upgrade()?;
+
+    if let Some(pkg_name) = only {
+        plan.to_upgrade.retain(|p| p.name == pkg_name);
+        if plan.to_upgrade.is_empty() {
+            println!("No upgrade for package '{}'", pkg_name);
+            return Ok(());
+        }
+    }
+
+    if security {
+        let sources = SourcesList::load()?;
+        let security_repos: Vec<_> = sources
+        .entries
+        .iter()
+        .filter(|e| e.suite.contains("security"))
+        .map(|e| &e.uri)
+        .collect();
+
+        plan.to_upgrade.retain(|p| {
+            p.repo_base_uri
+            .as_deref()
+            .map(|uri| security_repos.iter().any(|repo| uri.contains(*repo)))
+            .unwrap_or(false)
+        });
+        if plan.to_upgrade.is_empty() {
+            println!("No security updates available.");
+            return Ok(());
+        }
+    }
 
     if plan.to_upgrade.is_empty() {
         ui::deps_resolved();
@@ -352,7 +675,7 @@ pub async fn cmd_upgrade(assume_yes: bool) -> Result<()> {
     }
 
     println!();
-    let client  = download::HttpClient::new();
+    let client = download::HttpClient::new();
     let results = download::download_packages(&client, &plan.to_upgrade).await?;
 
     println!();
@@ -361,20 +684,30 @@ pub async fn cmd_upgrade(assume_yes: bool) -> Result<()> {
     let total = results.len();
     for (i, dl) in results.iter().enumerate() {
         let old_version = plan.upgrade_from.get(&dl.package.name).cloned();
-        let label = format!("{}-{}.{}", dl.package.name, dl.package.version, dl.package.architecture);
+        let label = format!(
+            "{}-{}.{}",
+            dl.package.name, dl.package.version, dl.package.architecture
+        );
         ui::print_install_step("Upgrading", &label, i + 1, total);
 
         let deb_bytes = std::fs::read(&dl.path)?;
-        let deb       = DebPackage::parse(&deb_bytes)?;
+        let deb = DebPackage::parse(&deb_bytes)?;
         let job = InstallJob {
-            pkg: dl.package.clone(), deb, path: dl.path.clone(),
-            reason: InstallReason::User, is_upgrade: true, old_version,
+            pkg: dl.package.clone(),
+            deb,
+            path: dl.path.clone(),
+            reason: InstallReason::User,
+            is_upgrade: true,
+            old_version,
         };
         install_package(&job, &db)?;
     }
 
     for (i, dl) in results.iter().enumerate() {
-        let label = format!("{}-{}.{}", dl.package.name, dl.package.version, dl.package.architecture);
+        let label = format!(
+            "{}-{}.{}",
+            dl.package.name, dl.package.version, dl.package.architecture
+        );
         ui::print_verify_step(&label, i + 1, total);
     }
 
@@ -385,19 +718,16 @@ pub async fn cmd_upgrade(assume_yes: bool) -> Result<()> {
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────
-//  autoremove
-// ─────────────────────────────────────────────────────────────
-
 pub async fn cmd_autoremove(assume_yes: bool) -> Result<()> {
     log::info("command: autoremove");
     ui::last_metadata_check();
 
-    let cache  = PackageCache::load()?;
-    let db     = InstalledDb::open()?;
+    let cache = PackageCache::load()?;
+    let db = InstalledDb::open()?;
     let solver = Solver::new(&cache, &db);
-    let arch   = detect_arch();
-    let plan   = solver.resolve_autoremove()?;
+    let arch = detect_arch();
+
+    let plan = solver.resolve_autoremove()?;
 
     if plan.to_autoremove.is_empty() {
         ui::nothing_to_do();
@@ -423,7 +753,10 @@ pub async fn cmd_autoremove(assume_yes: bool) -> Result<()> {
     let mut removed = Vec::new();
     for (i, name) in plan.to_autoremove.iter().enumerate() {
         if let Some(inst) = db.get(name) {
-            let label = format!("{}-{}.{}", inst.name, inst.version, inst.architecture);
+            let label = format!(
+                "{}-{}.{}",
+                inst.name, inst.version, inst.architecture
+            );
             ui::print_remove_step(&label, i + 1, total);
             remove_package(&inst, &db, false)?;
             removed.push(name.clone());
@@ -437,17 +770,44 @@ pub async fn cmd_autoremove(assume_yes: bool) -> Result<()> {
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────
-//  search
-// ─────────────────────────────────────────────────────────────
-
-pub async fn cmd_search(query: &str, installed_only: bool) -> Result<()> {
+pub async fn cmd_search(
+    query: &str,
+    installed: bool,
+    repo: Option<&str>,
+    section: Option<&str>,
+    exact: bool,
+    provides: Option<&str>,
+) -> Result<()> {
     log::info(&format!("search: {}", query));
     let cache = PackageCache::load()?;
-    let db    = InstalledDb::open()?;
+    let db = InstalledDb::open()?;
 
     let mut results: Vec<_> = cache.search(query);
-    if installed_only { results.retain(|p| db.is_installed(&p.name)); }
+    if installed {
+        results.retain(|p| db.is_installed(&p.name));
+    }
+    if let Some(repo_name) = repo {
+        results.retain(|p| {
+            p.repo_base_uri
+            .as_deref()
+            .unwrap_or("")
+            .contains(repo_name)
+        });
+    }
+    if let Some(sec) = section {
+        results.retain(|p| p.section.as_deref() == Some(sec));
+    }
+    if exact {
+        results.retain(|p| p.name.to_lowercase() == query.to_lowercase());
+    }
+    if let Some(prov) = provides {
+        results.retain(|p| {
+            p.provides.as_deref().map_or(false, |s| s.contains(prov))
+            || p.filename
+            .as_deref()
+            .map_or(false, |f| f.contains(prov))
+        });
+    }
 
     if results.is_empty() {
         println!("{}", "No matches found.".bold());
@@ -455,32 +815,28 @@ pub async fn cmd_search(query: &str, installed_only: bool) -> Result<()> {
     }
 
     ui::print_search_header(query, results.len());
-    for pkg in &results {
+    for pkg in results {
         ui::print_search_result(pkg, db.is_installed(&pkg.name));
     }
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────
-//  info
-// ─────────────────────────────────────────────────────────────
-
 pub async fn cmd_info(package: &str) -> Result<()> {
     log::info(&format!("info: {}", package));
     let cache = PackageCache::load()?;
-    let db    = InstalledDb::open()?;
+    let db = InstalledDb::open()?;
 
     let from_db: Option<crate::package::Package> = db.get(package).map(|inst| {
         crate::package::Package {
-            name:              inst.name,
-            version:           inst.version,
-            architecture:      inst.architecture,
+            name: inst.name,
+            version: inst.version,
+            architecture: inst.architecture,
             description_short: inst.description_short,
-            section:           inst.section,
-            maintainer:        inst.maintainer,
+            section: inst.section,
+            maintainer: inst.maintainer,
             installed_size_kb: Some(inst.installed_size_kb),
-                                                                       depends:           inst.depends,
-                                                                       recommends:        inst.recommends,
+                                                                       depends: inst.depends,
+                                                                       recommends: inst.recommends,
                                                                        ..Default::default()
         }
     });
@@ -490,9 +846,13 @@ pub async fn cmd_info(package: &str) -> Result<()> {
     .or_else(|| from_db.as_ref());
 
     match pkg {
-        None => bail!("No package named '{}' found.\n  Hint: try `lpm search {}`", package, package),
+        None => bail!(
+            "No package named '{}' found.\n  Hint: try `lpm search {}`",
+            package,
+            package
+        ),
         Some(p) => {
-            let is_installed  = db.is_installed(package);
+            let is_installed = db.is_installed(package);
             let installed_ver = db.get(package).map(|i| i.version.clone());
             ui::print_package_info(p, is_installed, installed_ver.as_deref());
         }
@@ -500,22 +860,27 @@ pub async fn cmd_info(package: &str) -> Result<()> {
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────
-//  list
-// ─────────────────────────────────────────────────────────────
-
-pub async fn cmd_list(installed: bool, upgradeable: bool, _available: bool) -> Result<()> {
+pub async fn cmd_list(
+    installed: bool,
+    upgradeable: bool,
+    _available: bool,
+) -> Result<()> {
     let cache = PackageCache::load()?;
-    let db    = InstalledDb::open()?;
+    let db = InstalledDb::open()?;
 
     if upgradeable {
-        let upgrades: Vec<_> = db.list_all()?
+        let upgrades: Vec<_> = db
+        .list_all()?
         .into_iter()
         .filter_map(|p| {
             let avail = cache.get(&p.name)?;
-            if crate::package::version_cmp(&avail.version, &p.version) == std::cmp::Ordering::Greater {
-                Some((p, avail.clone()))
-            } else { None }
+            if crate::package::version_cmp(&avail.version, &p.version)
+                == std::cmp::Ordering::Greater
+                {
+                    Some((p, avail.clone()))
+                } else {
+                    None
+                }
         })
         .collect();
 
@@ -523,43 +888,67 @@ pub async fn cmd_list(installed: bool, upgradeable: bool, _available: bool) -> R
             println!("{}", "No packages marked for upgrade.".bold());
         } else {
             for (inst, avail) in &upgrades {
-                let repo = avail.repo_base_uri.as_deref()
-                .unwrap_or("").trim_end_matches('/').split('/').last().unwrap_or("unknown");
+                let repo = avail
+                .repo_base_uri
+                .as_deref()
+                .unwrap_or("")
+                .trim_end_matches('/')
+                .split('/')
+                .last()
+                .unwrap_or("unknown");
                 ui::print_list_entry(
-                    &inst.name, &inst.version, &inst.architecture,
-                    true, repo, Some(&avail.version),
+                    &inst.name,
+                    &inst.version,
+                    &inst.architecture,
+                    true,
+                    repo,
+                    Some(&avail.version),
                 );
             }
         }
     } else if installed {
         for p in db.list_all()? {
             let new_ver = cache.get(&p.name).and_then(|a| {
-                if crate::package::version_cmp(&a.version, &p.version) == std::cmp::Ordering::Greater {
-                    Some(a.version.clone())
-                } else { None }
+                if crate::package::version_cmp(&a.version, &p.version)
+                    == std::cmp::Ordering::Greater
+                    {
+                        Some(a.version.clone())
+                    } else {
+                        None
+                    }
             });
             ui::print_list_entry(
-                &p.name, &p.version, &p.architecture,
-                true, "installed", new_ver.as_deref(),
+                &p.name,
+                &p.version,
+                &p.architecture,
+                true,
+                "installed",
+                new_ver.as_deref(),
             );
         }
     } else {
         for p in cache.all_packages() {
             let is_inst = db.is_installed(&p.name);
-            let repo = p.repo_base_uri.as_deref()
-            .unwrap_or("").trim_end_matches('/').split('/').last().unwrap_or("unknown");
+            let repo = p
+            .repo_base_uri
+            .as_deref()
+            .unwrap_or("")
+            .trim_end_matches('/')
+            .split('/')
+            .last()
+            .unwrap_or("unknown");
             ui::print_list_entry(
-                &p.name, &p.version, &p.architecture,
-                is_inst, repo, None,
+                &p.name,
+                &p.version,
+                &p.architecture,
+                is_inst,
+                repo,
+                None,
             );
         }
     }
     Ok(())
 }
-
-// ─────────────────────────────────────────────────────────────
-//  clean
-// ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_clean() -> Result<()> {
     log::info("command: clean");
@@ -570,7 +959,7 @@ pub async fn cmd_clean() -> Result<()> {
     if dir.exists() {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
-            let path  = entry.path();
+            let path = entry.path();
             if path.extension().map_or(false, |e| e == "deb" || e == "part") {
                 freed += entry.metadata().map(|m| m.len()).unwrap_or(0);
                 if std::fs::remove_file(&path).is_ok() {
@@ -589,24 +978,281 @@ pub async fn cmd_clean() -> Result<()> {
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────
-//  history
-// ─────────────────────────────────────────────────────────────
+pub async fn cmd_history(subcmd: Option<HistorySubcmd>) -> Result<()> {
+    let db = InstalledDb::open()?;
 
-pub async fn cmd_history() -> Result<()> {
-    let db      = InstalledDb::open()?;
-    let entries = db.history(50)?;
-    if entries.is_empty() {
-        println!("{}", "No transaction history.".bold());
-        return Ok(());
+    match subcmd {
+        None => {
+            let entries = db.history(50)?;
+            if entries.is_empty() {
+                println!("{}", "No transaction history.".bold());
+                return Ok(());
+            }
+            ui::print_history(&entries);
+        }
+        Some(HistorySubcmd::Undo { id }) => {
+            let entry = db
+            .get_history_entry(id)
+            .context("No such history entry")?
+            .context("History entry not found")?;
+
+            match entry.action.as_str() {
+                "install" => {
+                    let inst = db
+                    .get(&entry.package)
+                    .context("Package not installed, cannot undo install")?;
+                    remove_package(&inst, &db, false)?;
+                    println!("Undone install of {}", entry.package);
+                }
+                "remove" => {
+                    let cache = PackageCache::load()?;
+                    let reason = InstallReason::User;
+                    let solver = Solver::new(&cache, &db);
+                    let plan = solver.resolve_install(&[entry.package.clone()], true)?;
+                    let client = download::HttpClient::new();
+                    let results = download::download_packages(&client, &plan.to_install).await?;
+                    for dl in &results {
+                        let deb_bytes = std::fs::read(&dl.path)?;
+                        let deb = DebPackage::parse(&deb_bytes)?;
+                        let job = InstallJob {
+                            pkg: dl.package.clone(),
+                            deb,
+                            path: dl.path.clone(),
+                            reason,
+                            is_upgrade: false,
+                            old_version: None,
+                        };
+                        install_package(&job, &db)?;
+                    }
+                    println!("Reinstalled {}", entry.package);
+                }
+                "upgrade" => {
+                    let old_ver = entry.old_ver.context("No old version for upgrade")?;
+                    let cache = PackageCache::load()?;
+                    let pkg = cache
+                    .get_exact(&entry.package, &old_ver, &detect_arch())
+                    .context("Old version not found in cache, cannot downgrade")?;
+                    let reason = InstallReason::User;
+                    let client = download::HttpClient::new();
+                    let results = download::download_packages(&client, &[pkg.clone()]).await?;
+                    for dl in &results {
+                        let deb_bytes = std::fs::read(&dl.path)?;
+                        let deb = DebPackage::parse(&deb_bytes)?;
+                        let job = InstallJob {
+                            pkg: dl.package.clone(),
+                            deb,
+                            path: dl.path.clone(),
+                            reason,
+                            is_upgrade: false,
+                            old_version: None,
+                        };
+                        install_package(&job, &db)?;
+                    }
+                    println!("Downgraded {} to {}", entry.package, old_ver);
+                }
+                _ => bail!("Unsupported action for undo: {}", entry.action),
+            }
+        }
+        Some(HistorySubcmd::Redo { id }) => {
+            let entry = db
+            .get_history_entry(id)
+            .context("No such history entry")?
+            .context("History entry not found")?;
+            match entry.action.as_str() {
+                "install" => {
+                    let cache = PackageCache::load()?;
+                    let pkg = cache
+                    .get(&entry.package)
+                    .context("Package not found in cache")?;
+                    let reason = InstallReason::User;
+                    let client = download::HttpClient::new();
+                    let results = download::download_packages(&client, &[pkg.clone()]).await?;
+                    for dl in &results {
+                        let deb_bytes = std::fs::read(&dl.path)?;
+                        let deb = DebPackage::parse(&deb_bytes)?;
+                        let job = InstallJob {
+                            pkg: dl.package.clone(),
+                            deb,
+                            path: dl.path.clone(),
+                            reason,
+                            is_upgrade: false,
+                            old_version: None,
+                        };
+                        install_package(&job, &db)?;
+                    }
+                    println!("Redone install of {}", entry.package);
+                }
+                "remove" => {
+                    let inst = db
+                    .get(&entry.package)
+                    .context("Package not installed, cannot redo remove")?;
+                    remove_package(&inst, &db, false)?;
+                    println!("Redone remove of {}", entry.package);
+                }
+                "upgrade" => {
+                    let new_ver = entry.new_ver.context("No new version for upgrade")?;
+                    let cache = PackageCache::load()?;
+                    let pkg = cache
+                    .get_exact(&entry.package, &new_ver, &detect_arch())
+                    .context("New version not found in cache, cannot upgrade")?;
+                    let reason = InstallReason::User;
+                    let client = download::HttpClient::new();
+                    let results = download::download_packages(&client, &[pkg.clone()]).await?;
+                    for dl in &results {
+                        let deb_bytes = std::fs::read(&dl.path)?;
+                        let deb = DebPackage::parse(&deb_bytes)?;
+                        let job = InstallJob {
+                            pkg: dl.package.clone(),
+                            deb,
+                            path: dl.path.clone(),
+                            reason,
+                            is_upgrade: true,
+                            old_version: entry.old_ver.clone(),
+                        };
+                        install_package(&job, &db)?;
+                    }
+                    println!("Redone upgrade of {} to {}", entry.package, new_ver);
+                }
+                _ => bail!("Unsupported action for redo: {}", entry.action),
+            }
+        }
+        Some(HistorySubcmd::Diff { id1, id2 }) => {
+            let e1 = db
+            .get_history_entry(id1)
+            .context("No entry 1")?
+            .context("History entry 1 not found")?;
+            let e2 = db
+            .get_history_entry(id2)
+            .context("No entry 2")?
+            .context("History entry 2 not found")?;
+            println!("Diff between transaction {} and {}:", id1, id2);
+            println!("  {}: {} {} {}", e1.id, e1.action, e1.package, e1.timestamp);
+            println!("  {}: {} {} {}", e2.id, e2.action, e2.package, e2.timestamp);
+            println!("(Detailed diff not implemented)");
+        }
+        Some(HistorySubcmd::Export { path }) => {
+            let entries = db.history(1000)?;
+            let json = serde_json::to_string_pretty(&entries)?;
+            std::fs::write(&path, json)?;
+            println!("History exported to {}", path);
+        }
     }
-    ui::print_history(&entries);
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────
-//  version / help
-// ─────────────────────────────────────────────────────────────
+pub async fn cmd_repo(action: RepoAction) -> Result<()> {
+    match action {
+        RepoAction::List => {
+            let repos = repo::RepoManager::list()?;
+            for (i, entry) in repos {
+                println!("{}: {}", i, entry.uri);
+                println!("    suite: {}", entry.suite);
+                println!("    components: {}", entry.components.join(", "));
+                println!("    enabled: {}", entry.enabled);
+                println!();
+            }
+        }
+        RepoAction::Add {
+            uri,
+            suite,
+            components,
+        } => {
+            repo::RepoManager::add(&uri, &suite, &components)?;
+            println!("Repository added.");
+        }
+        RepoAction::Remove { id } => {
+            repo::RepoManager::remove(id)?;
+            println!("Repository {} removed.", id);
+        }
+        RepoAction::Enable { id } => {
+            repo::RepoManager::enable(id)?;
+            println!("Repository {} enabled.", id);
+        }
+        RepoAction::Disable { id } => {
+            repo::RepoManager::disable(id)?;
+            println!("Repository {} disabled.", id);
+        }
+    }
+    Ok(())
+}
+
+pub async fn cmd_key(action: KeyAction) -> Result<()> {
+    match action {
+        KeyAction::List => {
+            let keys = keyring::Keyring::list()?;
+            for key in keys {
+                println!("{}", key);
+            }
+        }
+        KeyAction::Add { path } => {
+            keyring::Keyring::add(&path)?;
+            println!("Key added.");
+        }
+    }
+    Ok(())
+}
+
+pub async fn cmd_whatprovides(file: &str) -> Result<()> {
+    let cache = PackageCache::load()?;
+    let db = InstalledDb::open()?;
+
+    let mut found = false;
+    for pkg in cache.all_packages() {
+        if pkg.filename.as_deref().map_or(false, |f| f.contains(file)) {
+            let status = if db.is_installed(&pkg.name) {
+                "installed"
+            } else {
+                "available"
+            };
+            println!("{} ({})", pkg.name, status);
+            found = true;
+        }
+    }
+    if !found {
+        println!("No package provides '{}'", file);
+    }
+    Ok(())
+}
+
+pub async fn cmd_provides(file: &str) -> Result<()> {
+    let db = InstalledDb::open()?;
+    let mut found = false;
+    for pkg in db.list_all()? {
+        if pkg.files.contains(file) {
+            println!("{}: {}", pkg.name, file);
+            found = true;
+        }
+    }
+    if !found {
+        println!("No installed package provides '{}'", file);
+    }
+    Ok(())
+}
+
+pub async fn cmd_check_update() -> Result<()> {
+    let cache = PackageCache::load()?;
+    let db = InstalledDb::open()?;
+    let solver = Solver::new(&cache, &db);
+    let plan = solver.resolve_upgrade()?;
+    if plan.to_upgrade.is_empty() {
+        println!("No updates available.");
+    } else {
+        println!("Available updates:");
+        for pkg in &plan.to_upgrade {
+            println!(
+                "  {}-{} -> {}",
+                pkg.name, pkg.version, plan.upgrade_from[&pkg.name]
+            );
+        }
+    }
+    Ok(())
+}
+
+pub async fn cmd_import_dpkg() -> Result<()> {
+    println!("Importing packages from dpkg/apt...");
+    crate::import_dpkg::import_from_dpkg()?;
+    Ok(())
+}
 
 pub fn print_version() {
     println!(
@@ -620,7 +1266,11 @@ pub fn print_version() {
 
 pub fn print_help() {
     println!();
-    println!("{} {}", "lpm".bold().bright_magenta(), "— Legendary Package Manager".bold());
+    println!(
+        "{} {}",
+        "lpm".bold().bright_magenta(),
+             "— Legendary Package Manager".bold()
+    );
     println!("  Standalone Debian-compatible. No apt/dpkg required.");
     println!();
     println!("{}", "Usage:".bold().yellow());
@@ -628,47 +1278,67 @@ pub fn print_help() {
     println!();
     println!("{}", "Package management:".bold().yellow());
     for (c, d) in &[
-        ("install <pkg...>",  "Install packages and dependencies"),
-        ("remove  <pkg...>",  "Remove packages"),
-        ("upgrade",           "Upgrade all installed packages"),
-        ("autoremove",        "Remove unneeded dependencies"),
+        ("install <pkg...>", "Install packages and dependencies"),
+        ("remove  <pkg...>", "Remove packages"),
+        ("upgrade", "Upgrade all installed packages"),
+        ("autoremove", "Remove unneeded dependencies"),
     ] {
         println!("  {:<35} {}", c.cyan(), d.dimmed());
     }
     println!();
     println!("{}", "Repositories and cache:".bold().yellow());
     for (c, d) in &[
-        ("update",  "Refresh package metadata"),
-        ("clean",   "Remove cached package files"),
+        ("update", "Refresh package metadata"),
+        ("clean", "Remove cached package files"),
+        ("repo list|add|remove|enable|disable", "Manage repositories"),
+        ("key list|add", "Manage GPG keys"),
+        ("import-dpkg", "Import existing packages from dpkg/apt"),
     ] {
         println!("  {:<35} {}", c.cyan(), d.dimmed());
     }
     println!();
     println!("{}", "Query:".bold().yellow());
     for (c, d) in &[
-        ("search <query>",               "Search package names and descriptions"),
-        ("info   <package>",             "Show package details"),
-        ("list [--installed|--upgrades]","List packages"),
-        ("history",                      "Show transaction history"),
+        ("search <query> [--installed] [--repo] [--section] [--exact] [--provides]", "Search packages"),
+        ("info   <package>", "Show package details"),
+        ("list [--installed|--upgrades]", "List packages"),
+        ("history [undo|redo|diff|export]", "Show transaction history"),
+        ("whatprovides <file>", "Find package that provides a file (in cache)"),
+        ("provides <file>", "Find installed package that provides a file"),
+        ("check-update", "Check for available upgrades without installing"),
     ] {
         println!("  {:<35} {}", c.cyan(), d.dimmed());
     }
     println!();
     println!("{}", "Options:".bold().yellow());
     for (o, d) in &[
-        ("-y, --yes",               "Assume yes"),
-        ("--purge",                 "Remove config files too"),
+        ("-y, --yes", "Assume yes"),
+        ("--purge", "Remove config files too"),
         ("--with-recommends", "Install recommended packages (off by default)"),
-        ("--installed",             "Filter to installed (list/search)"),
-        ("--upgrades",              "Show upgradeable only (list)"),
+        ("--installed", "Filter to installed (list/search)"),
+        ("--upgrades", "Show upgradeable only (list)"),
+        ("--only <pkg>", "Upgrade only the specified package"),
+        ("--security", "Only upgrade security updates"),
+        ("--repo <name>", "Search in specific repository"),
+        ("--section <name>", "Search in specific section"),
+        ("--exact", "Exact name match"),
+        ("--provides <file>", "Search packages that provide a file"),
     ] {
         println!("  {:<35} {}", o.cyan(), d.dimmed());
     }
     println!();
     println!("{}", "Config:".bold().yellow());
-    println!("  {:<12} {}", "Repos:".dimmed(), "/etc/apt/sources.list  or  /etc/lpm/sources-list.toml".cyan());
-    println!("  {:<12} {}", "DB:".dimmed(),    "/var/lib/lpm/lpm.db".cyan());
-    println!("  {:<12} {}", "Cache:".dimmed(), "/var/cache/lpm/archives/".cyan());
-    println!("  {:<12} {}", "Log:".dimmed(),   crate::log::LOG_FILE.cyan());
+    println!(
+        "  {:<12} {}",
+        "Repos:".dimmed(),
+             "/etc/lpm/sources.list  or  /etc/lpm/sources.list.d/*.list".cyan()
+    );
+    println!("  {:<12} {}", "DB:".dimmed(), "/var/lib/lpm/lpm.db".cyan());
+    println!(
+        "  {:<12} {}",
+        "Cache:".dimmed(),
+             "/var/cache/lpm/archives/".cyan()
+    );
+    println!("  {:<12} {}", "Log:".dimmed(), crate::log::LOG_FILE.cyan());
     println!();
 }
